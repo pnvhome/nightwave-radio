@@ -46,6 +46,8 @@ Use Previous and Next to navigate playback without losing newly generated queued
 - About 5 GB for the model, plus the app and recordings.
 - Internet for the initial download. Generation works locally afterward.
 
+**Tested on:** Mac Studio with Apple M5 Ultra and 96 GB unified memory. Release 1.3.1 was checked on this machine with live music generation, playback and queue tests. This is a tested configuration, not a minimum memory requirement.
+
 The build targets Apple M1, but has not been tested on every chip and OS combination. Generation speed varies with hardware, track length, and available memory.
 
 ## Install
