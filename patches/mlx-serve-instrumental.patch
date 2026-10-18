@@ -397,10 +397,10 @@ index 36b0a29..7d56cc5 100644
 +}
 diff --git a/src/yue2_instrumental.zig b/src/yue2_instrumental.zig
 new file mode 100644
-index 0000000..f63c97a
+index 0000000..5d67a0a
 --- /dev/null
 +++ b/src/yue2_instrumental.zig
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,92 @@
 +//! Official YuE2 Music Skill's event-level transfer, pinned and unmodified.
 +//! Only this opt-in CPU step needs local Python 3.9+ (stdlib); inference stays MLX.
 +const std = @import("std");
@@ -408,6 +408,7 @@ index 0000000..f63c97a
 +    .abc_tools = @embedFile("yue2_instrumental/abc_tools.py"),
 +    .common = @embedFile("yue2_instrumental/common.py"),
 +    .compile_score = @embedFile("yue2_instrumental/compile_score.py"),
++    .arrangement = @embedFile("yue2_instrumental/arrangement.py"),
 +    .instrumentalize = @embedFile("yue2_instrumental/instrumentalize.py"),
 +};
 +pub const Result = struct { abc: []u8, transfer: []u8, lyrics: []u8 };
@@ -521,10 +522,10 @@ index 0000000..3db9f3d
 +SOFTWARE.
 diff --git a/src/yue2_instrumental/PROVENANCE.txt b/src/yue2_instrumental/PROVENANCE.txt
 new file mode 100644
-index 0000000..2b51de2
+index 0000000..ff1f6f4
 --- /dev/null
 +++ b/src/yue2_instrumental/PROVENANCE.txt
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,20 @@
 +Upstream: https://github.com/multimodal-art-projection/YuE
 +Revision: 1647252d68b70cbead046ffd3f7caf036dde47ee
 +Directory: skills/yue2-music/instrumental/scripts
@@ -539,6 +540,12 @@ index 0000000..2b51de2
 +No Python packages, Torch, CUDA, HTTP calls, model downloads, or subprocess
 +inference are involved in this score-only step. Python 3.9+ is required only
 +when Instrumental Only is enabled. Inference and VAE decoding remain native MLX.
++
++Nightwave arrangement.py is an additional local post-transfer edit: it shortens
++exact unchanged melodic/harmonic runs of at least 60 nominal seconds, then
++revalidates the score. The separate arrangement_edit report records removed
++duration and before/after hashes; official transfer fields describe the score
++before this additional edit. No upstream module was changed.
 diff --git a/src/yue2_instrumental/abc_tools.py b/src/yue2_instrumental/abc_tools.py
 new file mode 100644
 index 0000000..88b66e5
@@ -882,12 +889,82 @@ index 0000000..88b66e5
 +
 +if __name__ == "__main__":
 +    raise SystemExit(main())
+diff --git a/src/yue2_instrumental/arrangement.py b/src/yue2_instrumental/arrangement.py
+new file mode 100644
+index 0000000..bb26dd0
+--- /dev/null
++++ b/src/yue2_instrumental/arrangement.py
+@@ -0,0 +1,64 @@
++"""Nightwave score edit, after the unchanged official vocal-to-instrument transfer.
++
++Shorten exact consecutive melodic AND harmonic repeats lasting >=60 seconds.
++Keep at least two occurrences and about 32 seconds. Returning themes, changing
++harmony and drones remain intact. No new notes, model calls or audio retries.
++"""
++import hashlib
++import math
++import re
++from abc_tools import parse_abc
++
++
++def shorten_static_runs(text):
++    score = parse_abc(text)
++    lines = [line.strip() for line in text.splitlines() if line.strip()]
++    music = list(score.music_lines)
++    groups = []
++    start, bar_index = 8, 0
++    for i in range(0, len(music), 2):
++        vocal, ins = music[i:i+2]
++        count = sum(int(m.group(1) or 1) if (m := re.fullmatch(r'Z([2-4])?', bar.strip())) else 1
++                    for bar in lines[ins][:-1].split('|'))
++        bars = score.voices['Ins'].bars[bar_index:bar_index+count]
++        seconds = float(sum(b[1] for b in bars) * 60 / score.bpm)
++        body = lines[start:ins+1]
++        signature = tuple(re.sub(r'\s+', '', line) for line in body if not line.startswith('% '))
++        pitches = set(re.findall('[A-Ga-g]', lines[ins]))
++        groups.append((body, signature, seconds, len(pitches) >= 3))
++        start = ins+1
++        bar_index += count
++    kept, removed, seconds_removed = [], 0, 0.0
++    index = 0
++    while index < len(groups):
++        end = index+1
++        while end < len(groups) and groups[end][1] == groups[index][1]:
++            end += 1
++        run = end-index
++        seconds = groups[index][2]
++        keep = run
++        if groups[index][3] and run*seconds >= 60:
++            keep = min(run, max(2, math.ceil(32 / seconds)))
++        for group in groups[index:index+keep]:
++            kept.extend(group[0])
++        removed += run-keep
++        seconds_removed += (run-keep)*seconds
++        index = end
++    if not removed:
++        return text, None
++    result = '\n'.join(lines[:8]+kept)+'\n'
++    # A cut must remain valid, including ties and synchronized voice timelines.
++    # If a valid splice cannot be proved, retain the already validated score.
++    try:
++        after = parse_abc(result)
++    except ValueError:
++        return text, None
++    if after.voices['Vocal'].notes:
++        return text, None
++    return result, {
++        'operation': 'shorten_exact_static_runs',
++        'removed_groups': removed,
++        'removed_nominal_seconds': seconds_removed,
++        'before_sha256': hashlib.sha256(text.encode()).hexdigest(),
++        'after_sha256': hashlib.sha256(result.encode()).hexdigest(),
++    }
 diff --git a/src/yue2_instrumental/bridge.py b/src/yue2_instrumental/bridge.py
 new file mode 100644
-index 0000000..cf20af1
+index 0000000..68d024b
 --- /dev/null
 +++ b/src/yue2_instrumental/bridge.py
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,29 @@
 +"""Local stdlib-only adapter; embedded by Zig, no runtime source files needed."""
 +import json
 +import sys
@@ -905,8 +982,12 @@ index 0000000..cf20af1
 +    sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent))
 +
 +from instrumentalize import convert_score
++from arrangement import shorten_static_runs
 +try:
 +    abc, report = convert_score(sys.argv[-1], overlap='vocal', keep_chords=True)
++    abc, edit = shorten_static_runs(abc)
++    if edit is not None:
++        report['arrangement_edit'] = edit
 +    labels = [line[2:] for line in abc.splitlines() if line.startswith('% ')]
 +    lyrics = '\n\n'.join('[' + x.title() + ']' for x in labels) + ('\n' if labels else '')
 +    print(json.dumps({'abc': abc, 'transfer': report, 'lyrics': lyrics}))
@@ -1481,8 +1562,65 @@ index 0000000..51c834c
 +    try std.testing.expectEqual(@as(f32, 0), restored[0]);
 +    try std.testing.expectEqual(@as(f32, 0), restored[1]);
 +}
+diff --git a/tests/test_yue2_arrangement.py b/tests/test_yue2_arrangement.py
+new file mode 100644
+index 0000000..36caa14
+--- /dev/null
++++ b/tests/test_yue2_arrangement.py
+@@ -0,0 +1,51 @@
++import pathlib, sys, unittest
++sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]/'src/yue2_instrumental'))
++from arrangement import shorten_static_runs
++from abc_tools import parse_abc
++HEADER='''X:1
++T:
++M:4/4
++L:1/8
++Q:1/4=60
++V: Vocal clef=treble name="Vocal Melody" snm="Vocal"
++V: Ins clef=treble name="Ins Melody" snm="Inst."
++K:C
++'''
++def group(notes='C2D2E2G2|',chord='C'):
++    return 'V: Vocal\n'+('"'+chord+'"z8|')*4+'\nV: Ins\n'+notes*4+'\n'
++class ArrangementTests(unittest.TestCase):
++    def test_long_unchanged_run_shortened_both_voices(self):
++        original=HEADER+group()*8+group('E2F2G2A2|')
++        result, report=shorten_static_runs(original)
++        self.assertIsNotNone(report)
++        before, after=parse_abc(original),parse_abc(result)
++        self.assertEqual(after.voices['Ins'].time,48)
++        self.assertEqual(after.voices['Ins'].bars,after.voices['Vocal'].bars)
++        self.assertEqual(after.voices['Ins'].notes[-16:],[[t-96,p,d] for t,p,d in before.voices['Ins'].notes[-16:]])
++        self.assertFalse(after.voices['Vocal'].notes)
++    def test_short_recurrence_retained(self):
++        s=HEADER+group()*3;self.assertEqual(shorten_static_runs(s),(s,None))
++    def test_returning_theme_retained(self):
++        s=HEADER+(group()*3+group('E2F2G2A2|'))*3;self.assertEqual(shorten_static_runs(s),(s,None))
++    def test_changing_harmony_retained(self):
++        s=HEADER+''.join(group(chord=c) for c in ['C','Am','F','G']*4);self.assertEqual(shorten_static_runs(s),(s,None))
++    def test_drones_retained(self):
++        s=HEADER+group('C8|')*12;self.assertEqual(shorten_static_runs(s),(s,None))
++    def test_meter_and_key_changes_valid(self):
++        s=HEADER+group()*8+'% outro\n'+group('E2F2G2A2|')
++        result,_=shorten_static_runs(s);self.assertIn('% outro',result);parse_abc(result)
++    def test_section_labels_do_not_hide_unchanged_music(self):
++        s=HEADER+''.join('% verse\n'+group()*3 for _ in range(4))+group('E2F2G2A2|')
++        result,report=shorten_static_runs(s)
++        self.assertIsNotNone(report)
++        self.assertEqual(parse_abc(result).voices['Ins'].time,48)
++    def test_ties_remain_valid_at_splice(self):
++        s=HEADER+group('C2D2E2C2-|')*8+group('C2D2E2G2|')
++        parse_abc(s)
++        result,report=shorten_static_runs(s)
++        self.assertIsNotNone(report)
++        parse_abc(result)
++    def test_idempotent(self):
++        result,_=shorten_static_runs(HEADER+group()*8+group('E2F2G2A2|'))
++        self.assertEqual(shorten_static_runs(result),(result,None))
++if __name__=='__main__':unittest.main()
 diff --git a/tests/test_yue2_gen.sh b/tests/test_yue2_gen.sh
-index 2f0e399..dc17069 100755
+index 2f0e399..c90bead 100755
 --- a/tests/test_yue2_gen.sh
 +++ b/tests/test_yue2_gen.sh
 @@ -18,6 +18,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -1507,7 +1645,7 @@ index 2f0e399..dc17069 100755
  code=$(api /v1/audio/speech -X POST -H 'Content-Type: application/json' \
    -d "{\"model\":\"$ID\",\"input\":\"hello\"}" -o /dev/null -w "%{http_code}")
  [ "$code" = "400" ] || { echo "FAIL: /v1/audio/speech on a music model returned $code (want 400)"; exit 1; }
-@@ -167,6 +170,53 @@ tail -n +"$((mark + 1))" "$TMP/server.log" | grep -q '\[yue2\] planning' \
+@@ -167,6 +170,56 @@ tail -n +"$((mark + 1))" "$TMP/server.log" | grep -q '\[yue2\] planning' \
    && { echo "FAIL: a supplied score was re-planned"; exit 1; }
  echo "PASS: abc supplied -> no planning phase"
  
@@ -1534,11 +1672,14 @@ index 2f0e399..dc17069 100755
 +sys.path.insert(0, root + '/src/yue2_instrumental')
 +from abc_tools import parse_abc
 +from instrumentalize import convert_score
++from arrangement import shorten_static_runs
 +rows = [json.loads(s[6:]) for s in pathlib.Path(tmp + '/instrumental.sse').read_text().splitlines()
 +        if s.startswith('data: ') and s[6:].strip() != '[DONE]']
 +assert not [r for r in rows if r.get('type') == 'error'], rows
 +complete = next(r for r in rows if r.get('type') == 'complete')
 +expected, report = convert_score(complete['original_abc'])
++expected, edit = shorten_static_runs(expected)
++if edit is not None: report['arrangement_edit'] = edit
 +assert complete['abc'] == expected
 +assert complete['instrumental_transfer'] == report
 +assert not parse_abc(complete['abc']).voices['Vocal'].notes
@@ -1561,7 +1702,7 @@ index 2f0e399..dc17069 100755
  # 6. Server alive, no MLX error, then coexist with a chat model.
  curl -sf "http://127.0.0.1:$PORT/health" >/dev/null || { echo "FAIL: server died"; exit 1; }
  grep -q '\[mlx\]' "$TMP/server.log" && { echo "FAIL: MLX error in the log"; grep '\[mlx\]' "$TMP/server.log" | head -3; exit 1; }
-@@ -190,4 +240,12 @@ assert m and m[0]['state']=='unloaded', 'model should be unloaded: '+json.dumps(
+@@ -190,4 +243,12 @@ assert m and m[0]['state']=='unloaded', 'model should be unloaded: '+json.dumps(
  print('PASS: unload-model -> unloaded (stub retained)')
  "
  
@@ -1576,7 +1717,7 @@ index 2f0e399..dc17069 100755
  echo "ALL PASS: YuE2 gen (load->gen->unload, named 400s, WAV frames, seeded repeat, planned and supplied scores)"
 diff --git a/tests/test_yue2_instrumental.py b/tests/test_yue2_instrumental.py
 new file mode 100644
-index 0000000..6ede64f
+index 0000000..400d9d9
 --- /dev/null
 +++ b/tests/test_yue2_instrumental.py
 @@ -0,0 +1,67 @@
@@ -1625,7 +1766,7 @@ index 0000000..6ede64f
 +        score = (HELPER.parent / 'example-original.abc').read_text()
 +        expected, report = convert_score(score)
 +        sources = {name: (HELPER.parent / (name + '.py')).read_text()
-+                   for name in ('abc_tools', 'common', 'compile_score', 'instrumentalize')}
++                   for name in ('abc_tools', 'common', 'compile_score', 'instrumentalize', 'arrangement')}
 +        for python in (sys.executable, '/usr/bin/python3'):
 +            result = subprocess.run([python, '-I', '-c', HELPER.read_text(), json.dumps(sources), score],
 +                                    capture_output=True, text=True, timeout=10)

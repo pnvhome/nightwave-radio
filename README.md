@@ -67,13 +67,14 @@ brew install cmake webp
 # Select a full Xcode installation with macOS SDK >= 26.2 and Metal Toolchain.
 export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
 swift test
+bash scripts/test-score-tools.sh
 bash scripts/build.sh
 bash scripts/package-release.sh
 ```
 
 ## Instrumental pipeline and limitations
 
-The native YuE2 AR model writes a score with Mothersuperior's instrumental adapter active (`cot=full`). The official instrumental scripts transfer vocal note events into the instrumental part, preserve musical timing, and validate the result. The engine re-tokenizes the transformed score, then runs native MLX semantic generation, NAR synthesis, and VAE decoding. This is not just a “no vocals” prompt.
+The native YuE2 AR model writes a score with Mothersuperior's instrumental adapter active (`cot=full`). The official instrumental scripts transfer vocal note events into the instrumental part, preserve musical timing, and validate the result. A separate Nightwave edit shortens exact, consecutive melodic and harmonic repeats lasting at least 60 nominal seconds, retaining about 32 seconds and at least two occurrences. It leaves returning themes, changing harmony and drones alone, revalidates any splice, and records changes in the transfer report. This can shorten a track and does not detect every audible loop. The engine re-tokenizes the transformed score, then runs native MLX semantic generation, NAR synthesis, and VAE decoding. This is not just a “no vocals” prompt.
 
 Score generation is stochastic. Invalid/truncated scores are retried up to three times with fresh seeds; a persistent failure stops the radio and shows an error. The symbolic checks do **not** analyze rendered audio for vocals, and instrumental output cannot be guaranteed for every generation. Duration is a cap, not an exact song-length promise.
 

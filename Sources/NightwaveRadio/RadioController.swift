@@ -16,6 +16,8 @@ final class RadioController: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var error: String?
     @Published var current: SavedTrack?
     @Published var queued: SavedTrack?
+    private var reserve: SavedTrack?
+    private var longestGenerationSeconds: Double = 0
     @Published var history: [SavedTrack] = []
     @Published var usage = UsageTotals()
     @Published var sessionUsage = UsageTotals()
@@ -157,7 +159,7 @@ final class RadioController: NSObject, ObservableObject, AVAudioPlayerDelegate {
         guard !busy else { return }
         refreshModel(); guard modelAvailable else { error = "Download YuE2 first or choose an existing model folder."; return }
         guard settings.customPrompt.count <= 3000 else { error = "Shorten the description to 3,000 characters."; return }
-        error = nil; running = true; paused = false; queued = nil; generationProgress = nil
+        error = nil; running = true; paused = false; queued = nil; reserve = nil; longestGenerationSeconds = 0; generationProgress = nil
         salt = Int.random(in: 0...10_000); index = 0
         let id = UUID(); runID = id
         task = Task {
@@ -165,7 +167,10 @@ final class RadioController: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 status = "Loading YuE2 into memory"
                 try await engine.prepare(model: modelURL)
                 while !Task.isCancelled && runID == id {
-                    while queued != nil { try await Task.sleep(nanoseconds: 300_000_000) }
+                    while let next = queued {
+                        if reserve == nil && PrefetchPolicy.needsReserve(nextDuration: next.durationSeconds ?? Double(settings.duration), longestGeneration: longestGenerationSeconds) { break }
+                        try await Task.sleep(nanoseconds: 300_000_000)
+                    }
                     try Task.checkCancellation()
                     let snapshot = settings
                     let output = tracksDirectory.appendingPathComponent("\(Date().formatted(.iso8601).replacingOccurrences(of: ":", with: "-"))-\(UUID().uuidString.prefix(6)).m4a")
@@ -178,12 +183,13 @@ final class RadioController: NSObject, ObservableObject, AVAudioPlayerDelegate {
                         track.durationSeconds = Double(audio.length) / audio.processingFormat.sampleRate
                     }
                     lastGenerationSeconds = track.generationSeconds
+                    longestGenerationSeconds = max(longestGenerationSeconds, track.generationSeconds ?? 0)
                     usage.recordTrack(duration: track.durationSeconds ?? 0, generation: track.generationSeconds ?? 0)
                     sessionUsage.recordTrack(duration: track.durationSeconds ?? 0, generation: track.generationSeconds ?? 0)
                     saveUsage(); lastFolderScan = 0
                     index += 1; history.insert(track, at: 0); try saveHistory()
                     generationProgress = nil
-                    if player == nil { try play(track) } else { queued = track }
+                    if player == nil { try play(track) } else if queued == nil { queued = track } else { reserve = track }
                     status = queued == nil ? "Composing the next track" : "Next track ready"
                 }
             } catch is CancellationError { }
@@ -221,7 +227,7 @@ final class RadioController: NSObject, ObservableObject, AVAudioPlayerDelegate {
     func skip() {
         player?.stop(); player = nil; paused = false; elapsed = 0; total = 0
         if let next = queued {
-            queued = nil
+            queued = reserve; reserve = nil
             do { try play(next) } catch { self.error = error.localizedDescription }
         } else { current = nil; if running { status = "Waiting for the next track" } }
     }
@@ -235,7 +241,7 @@ final class RadioController: NSObject, ObservableObject, AVAudioPlayerDelegate {
     func stop() {
         runID = UUID(); task?.cancel(); task = nil
         player?.stop(); player = nil; engine.stop()
-        running = false; downloading = false; paused = false; current = nil; queued = nil
+        running = false; downloading = false; paused = false; current = nil; queued = nil; reserve = nil
         elapsed = 0; total = 0; generationProgress = nil; status = "Radio stopped · releasing memory"
         saveUsage(); sampleResources(); refreshModel()
     }

@@ -284,3 +284,16 @@ final class PlaybackContinuityRetryTests: XCTestCase {
         }
     }
 }
+
+final class PrefetchPolicyTests: XCTestCase {
+    func testShortenedTrackGetsReserveBeforePlayback() {
+        XCTAssertTrue(PrefetchPolicy.needsReserve(nextDuration: 46, longestGeneration: 68))
+        XCTAssertTrue(PrefetchPolicy.needsReserve(nextDuration: 46, longestGeneration: 31))
+    }
+    func testFullTrackDoesNotRequestExtraGeneration() {
+        XCTAssertFalse(PrefetchPolicy.needsReserve(nextDuration: 180, longestGeneration: 68))
+    }
+    func testSlowerMacUsesMeasuredGenerationBudget() {
+        XCTAssertTrue(PrefetchPolicy.needsReserve(nextDuration: 120, longestGeneration: 100))
+    }
+}

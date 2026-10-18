@@ -65,19 +65,22 @@ struct NightwaveRadioApp: App {
                         guard radio.current != nil else { throw RadioFailure("Playback did not start") }
                         radio.togglePause()
                         guard radio.paused else { throw RadioFailure("Pause failed") }
+                    } else if target == 2 {
+                        guard radio.queued != nil, radio.paused else { throw RadioFailure("Track was not queued while paused") }
                     } else {
-                        guard let next = radio.queued else { throw RadioFailure("Track was not queued") }
+                        // Keep the first track paused until both the next short
+                        // track and its reserve exist, then verify FIFO promotion.
+                        guard let next = radio.queued else { throw RadioFailure("Next track missing") }
+                        let third = radio.history[0]
                         radio.togglePause()
                         guard !radio.paused else { throw RadioFailure("Resume failed") }
-                        if target == 2 {
-                            radio.skip()
-                            guard radio.current?.id == next.id else { throw RadioFailure("Skip failed") }
-                            radio.togglePause()
-                        } else {
-                            while radio.current?.id != next.id {
-                                guard Date() < deadline else { throw RadioFailure("Automatic transition failed") }
-                                try await Task.sleep(nanoseconds: 200_000_000)
-                            }
+                        radio.skip()
+                        guard radio.current?.id == next.id, radio.queued?.id == third.id else {
+                            throw RadioFailure("Reserve queue promotion failed")
+                        }
+                        while radio.current?.id != third.id {
+                            guard Date() < deadline else { throw RadioFailure("Automatic transition failed") }
+                            try await Task.sleep(nanoseconds: 200_000_000)
                         }
                     }
                 }
@@ -93,7 +96,7 @@ struct NightwaveRadioApp: App {
                 radio.stop()
                 guard !radio.resources.engineRunning && radio.resources.engineBytes == nil else { throw RadioFailure("Stopped engine resources did not reset") }
                 guard !radio.running && radio.current == nil else { throw RadioFailure("Stop failed") }
-                try "PASS: three sequential tracks, queued playback, pause, resume, skip, automatic transition, stop, usage persistence, live resource counters\n".write(to: root.appendingPathComponent("result.txt"), atomically: true, encoding: .utf8)
+                try "PASS: three sequential tracks, reserve queue promotion, queued playback, pause, resume, skip, automatic transition, stop, usage persistence, live resource counters\n".write(to: root.appendingPathComponent("result.txt"), atomically: true, encoding: .utf8)
                 print("QUEUE PASS: \(root.path)")
                 fflush(stdout)
                 Darwin.exit(0)

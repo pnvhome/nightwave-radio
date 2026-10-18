@@ -12,7 +12,7 @@ CC BY-NC 4.0 permits non-commercial sharing and adaptation with attribution, lic
 
 | Component | Author / source | Terms and modifications |
 | --- | --- | --- |
-| MLX-Serve | David Dalcu, https://github.com/ddalcu/mlx-serve | MIT and upstream third-party notices. Pinned base `3b6d2fd4d8ee4688f6adfed837e2672b1275582b`. Our patch adds instrumental score transfer, native AR LoRA, tests, and a download-directory override. |
+| MLX-Serve | David Dalcu, https://github.com/ddalcu/mlx-serve | MIT and upstream third-party notices. Pinned base `3b6d2fd4d8ee4688f6adfed837e2672b1275582b`. Our patch adds instrumental score transfer, native AR LoRA, conservative shortening of long unchanged score passages, tests, and a download-directory override. |
 | YuE2 3B | M-A-P, https://huggingface.co/m-a-p/YuE2-3B | CC BY-NC 4.0. Base weights downloaded separately, not in this source repository or DMG. |
 | YuE2 MLX 8-bit conversion | ddalcu, https://huggingface.co/ddalcu/YuE2-3B-MLX-Serve-8bit ; upstream layout credited to ahmadw/YuE2-3B-MLX | Under the original model terms. Downloaded separately; never re-licensed by this project. |
 | Instrumental AR LoRA | Mothersuperior, https://huggingface.co/Mothersuperior/YuE2-instrumental-cot-full-loras | CC BY-NC 4.0. Bundled unmodified BF16 weights, revision `947f2f4b28978b2b6c3e316e6a87925c76bf3c4b`. Native application code applies the adapter at runtime; weights are not merged into the base model. |

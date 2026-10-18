@@ -34,3 +34,33 @@ The earlier frequency-based rule was too strict for recurring themes. The local 
 ### Playback continuity takes priority (build 11)
 
 Removed the post-synthesis score-quality gate from live generation. Completed audio is no longer discarded and regenerated because of melodic repetition. The symbolic checker remains an offline diagnostic helper only. Automatic retries are limited to invalid/truncated instrumental plans that fail before synthesis. This avoids multiplying full-track generation time but does not guarantee uninterrupted playback when the model itself generates too slowly. A regression test verifies that musical-quality errors cannot cause additional full-generation attempts.
+
+### Pre-synthesis static-run edit (build 13)
+
+The timed section-caption experiment was rejected: two of the three captured Ambient requests produced an invalid or truncated score. It is not in this build. Planning retains the existing instrumental LoRA caption and sampling.
+
+After the unchanged official transfer, a separate stdlib-only edit shortens exact consecutive melody-and-harmony groups lasting at least 60 nominal seconds. It retains at least two occurrences and approximately 32 seconds, preserves later music, and revalidates synchronized voices and ties. Section labels alone do not conceal unchanged music. Returning themes, changed chords, short repeats and drones are unchanged. Invalid splices retain the original validated score. A separate `arrangement_edit` audit records removed duration and hashes; upstream transfer fields refer to the score before this local edit.
+
+This is conservative symbolic editing, not audio similarity detection or newly composed variation. It can shorten tracks. It does not guarantee that timbre or arrangement will sound varied, nor does it detect approximate repeats. It adds no model calls, quality retries, or discarded rendered audio.
+
+- 23 Swift tests passed.
+- 13 CPU score tests passed (4 official bridge tests, 9 arrangement tests), including embedded isolated-Python execution, recurring themes, harmony changes, section labels, synchronized timelines and tied-note splices.
+- Full backend test command completed successfully before the final Python edit; focused YuE2 backend tests also completed successfully after it.
+- Final patch application was checked against pinned upstream files and reproduces the local changed sources.
+- The score edit alone averaged 4.53 ms over 20 runs on the long-loop example (not an end-to-end generation benchmark).
+
+Three captured Ambient requests were replayed with their original seeds, duration cap (180 seconds) and 32 steps. All three completed in one attempt with no vocal notes after official transfer:
+
+| Seed | Generation wall time | Rendered duration | Arrangement edit |
+| --- | ---: | ---: | --- |
+| 504381763 | 61.82 s | 180.00 s | None; recurring phrases retained |
+| 1683861984 | 67.65 s | 180.00 s | None; differences retained |
+| 2098101470 | 30.72 s | 46.08 s | 23 repeated groups removed before synthesis |
+
+The first two requests reproduce their earlier symbolic structures; this change specifically fixes the long exact static run in the third example. These results do not demonstrate that all three sound sufficiently varied. Listening remains necessary before publication.
+
+Shortened tracks also trigger one extra ready-track reserve when their duration is below 1.5 times the longest generation in the current session (minimum budget 60 seconds). The queue is bounded to two ready tracks, generated serially. Normal long queued tracks retain the previous one-track buffer. This uses idle playback time to prepare the following track rather than waiting for the short track to start. Sustained generation slower than playback can still exhaust the buffer.
+
+The final Swift suite passes 26 tests, including short-track reserve policy and the measured generation budget.
+
+The final bundled app passed a live three-track queue test: paused playback while filling the reserve, FIFO reserve promotion on manual skip, automatic transition, stop/cancellation, usage persistence and resource counters. Bundle audit and strict signature verification passed. Public release remains deferred pending listening feedback.
