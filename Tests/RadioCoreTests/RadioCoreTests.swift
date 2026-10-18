@@ -235,10 +235,10 @@ final class ScoreQualityTests: XCTestCase {
     func score(_ phrases: [String]) -> String {
         "X:1\nK:C\n" + phrases.map { "V: Vocal\nz8|z8|z8|z8|\nV: Ins\n" + $0 }.joined(separator: "\n")
     }
-    func testRejectsDominantPhraseAcrossSeparatedSections() {
+    func testAllowsReturningThemeAcrossSeparatedSections() {
         let repeated = "C2D2E2F2|G2A2B2c2|d2e2f2g2|a2b2c2d2|"
         let phrases = (0..<20).map { $0 % 4 == 0 ? repeated : "C8|D8|E8|F\($0 + 1)|" }
-        XCTAssertTrue(ScoreQuality.hasDominantMelodicLoop(score(phrases)))
+        XCTAssertFalse(ScoreQuality.hasDominantMelodicLoop(score(phrases)))
     }
     func testAllowsVariedCompositionAndRestOrDroneTextures() {
         XCTAssertFalse(ScoreQuality.hasDominantMelodicLoop(score((0..<20).map { "C8|D8|E8|F\($0 + 1)|" })))
@@ -248,5 +248,23 @@ final class ScoreQualityTests: XCTestCase {
     func testRepetitiveScoresUseBoundedRetry() {
         XCTAssertTrue(GenerationRetry.shouldRetry(ScoreQuality.Repetitive().localizedDescription, completedAttempts: 1))
         XCTAssertFalse(GenerationRetry.shouldRetry(ScoreQuality.Repetitive().localizedDescription, completedAttempts: 3))
+    }
+}
+
+final class ConsecutiveScoreLoopTests: XCTestCase {
+    let phrase = "C2D2E2F2|G2A2B2c2|d2e2f2g2|a2b2c2d2|"
+    func score(changingHarmony: Bool, variationAt: Int? = nil, count: Int = 8) -> String {
+        (0..<count).map { i in
+            let chord = changingHarmony && i % 2 == 1 ? "G" : "C"
+            let harmony = Array(repeating: "\"\(chord)\"z8|", count: 4).joined()
+            let notes = variationAt == i ? "C8|D8|E8|F8|" : phrase
+            return "V: Vocal\n" + harmony + "\nV: Ins\n" + notes
+        }.joined(separator: "\n")
+    }
+    func testRejectsOnlyLongUninterruptedUnchangedRuns() {
+        XCTAssertTrue(ScoreQuality.hasDominantMelodicLoop(score(changingHarmony: false)))
+        XCTAssertFalse(ScoreQuality.hasDominantMelodicLoop(score(changingHarmony: false, count: 7)))
+        XCTAssertFalse(ScoreQuality.hasDominantMelodicLoop(score(changingHarmony: false, variationAt: 4, count: 12)))
+        XCTAssertFalse(ScoreQuality.hasDominantMelodicLoop(score(changingHarmony: true, count: 20)))
     }
 }

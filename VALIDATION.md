@@ -26,3 +26,7 @@ The public beta still needs independent clean-Mac installation and full download
 - A real 180-second request produced a repetitive first result, which was rejected before archiving/playback. The second attempt used a different arrangement and produced 120 seconds of audio, 12 distinct score phrases, and zero vocal notes in the official transfer report. A duration request is an upper bound.
 - Bundle audit and strict signature verification passed. The app uses the unchanged, previously built 1.3.0 backend and runtime; this candidate changes Swift application behavior only.
 - Repetition is currently checked after audio synthesis, so a rejected result costs generation time. Three unsuccessful attempts still stop generation; uninterrupted recovery and absence of audible repetition/vocals are not guaranteed. Listening and a longer Ambient session remain necessary before a public release.
+
+### Refined repetition policy
+
+The earlier frequency-based rule was too strict for recurring themes. The local candidate now rejects only eight consecutive identical four-bar phrases, including unchanged harmony. Intervening melodic or harmonic changes reset the run; ordinary returning themes and shorter repeats pass. This still cannot observe timbre or arrangement changes that are absent from the symbolic score.
