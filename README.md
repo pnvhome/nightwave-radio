@@ -89,3 +89,7 @@ Built on [MLX-Serve](https://github.com/ddalcu/mlx-serve), [YuE2](https://huggin
 Automatic track transitions use a fade of up to three seconds when the next track is ready. Short tracks use a shorter overlap. Manual skipping remains immediate. Recordings are saved without the playback fade.
 
 On a Mac with an audio output device, run playback integration tests with `NIGHTWAVE_AUDIO_TESTS=1 swift test --filter CrossfadeTests`. These use silent local fixtures and do not load a music model.
+
+Start radio immediately plays the newest readable recording made with matching station, sound options, description and requested duration, while YuE2 loads and creates new music. Volume is excluded from matching. Older recordings use their saved request metadata; uncertain matches are skipped.
+
+Use Previous and Next to navigate playback without losing newly generated queued tracks. The player’s recording picker includes search, and every row in Recordings has a play button. Saved tracks can play without loading or installing the model; selecting one during an active radio session keeps generation running. Replaying a recording does not add it to history again or count it as a newly generated track.

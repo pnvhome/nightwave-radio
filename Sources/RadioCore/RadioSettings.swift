@@ -126,6 +126,7 @@ public struct SavedTrack: Codable, Identifiable {
     public var seed: Int
     public var durationSeconds: Double?
     public var generationSeconds: Double?
+    public var generationSettings: RadioSettings?
     public init(title: String, path: String, prompt: String, seed: Int) {
         id = UUID(); self.title = title; self.path = path; date = Date(); self.prompt = prompt; self.seed = seed
     }

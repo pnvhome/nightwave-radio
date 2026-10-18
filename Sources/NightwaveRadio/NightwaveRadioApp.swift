@@ -38,6 +38,7 @@ struct NightwaveRadioApp: App {
             CommandMenu("Radio") {
                 Button("Start") { controller.start() }.disabled(controller.busy).keyboardShortcut("r", modifiers: .command)
                 Button("Pause / resume") { controller.togglePause() }.keyboardShortcut(" ", modifiers: [])
+                Button("Previous track") { controller.previous() }.disabled(!controller.canGoBack).keyboardShortcut(.leftArrow, modifiers: .command)
                 Button("Next track") { controller.skip() }.keyboardShortcut(.rightArrow, modifiers: .command)
                 Button("Stop and release memory") { controller.stop() }.keyboardShortcut(".", modifiers: .command)
                 Divider()

@@ -16,6 +16,7 @@ final class RadioController: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var error: String?
     @Published var current: SavedTrack?
     @Published var queued: SavedTrack?
+    private var trail = PlaybackTrail()
     private var reserve: SavedTrack?
     private var longestGenerationSeconds: Double = 0
     @Published var history: [SavedTrack] = []
@@ -160,9 +161,20 @@ final class RadioController: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
     func start() {
         guard !busy else { return }
-        refreshModel(); guard modelAvailable else { error = "Download YuE2 first or choose an existing model folder."; return }
         guard settings.customPrompt.count <= 3000 else { error = "Shorten the description to 3,000 characters."; return }
-        error = nil; running = true; paused = false; queued = nil; reserve = nil; longestGenerationSeconds = 0; generationProgress = nil
+        error = nil
+        let reusedRecording = resumeLatestMatchingRecording()
+        refreshModel()
+        guard modelAvailable else {
+            if reusedRecording { status = "Playing recording · download YuE2 for new music" }
+            else { error = "Download YuE2 first or choose an existing model folder." }
+            return
+        }
+        if !reusedRecording, current != nil {
+            trail.record(current); finishCrossfade(); player?.stop(); player = nil
+            current = nil; elapsed = 0; total = 0
+        }
+        running = true; paused = false; queued = nil; reserve = nil; longestGenerationSeconds = 0; generationProgress = nil
         salt = Int.random(in: 0...10_000); index = 0
         let id = UUID(); runID = id
         task = Task {
@@ -215,11 +227,14 @@ final class RadioController: NSObject, ObservableObject, AVAudioPlayerDelegate {
             self.generationProgress = nil
         })
     }
-    func play(_ track: SavedTrack) throws {
+    func play(_ track: SavedTrack, recordHistory: Bool = true) throws {
         let audio = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: track.path))
         audio.delegate = self; audio.volume = settings.volume
         audio.prepareToPlay()
         guard audio.play() else { throw RadioFailure("Could not start playback. Check your audio output device.") }
+        finishCrossfade()
+        player?.stop()
+        if recordHistory, current?.id != track.id { trail.record(current) }
         player = audio; current = track; elapsed = 0; total = audio.duration; paused = false
     }
     private func applyPlaybackVolumes() {
@@ -243,7 +258,7 @@ final class RadioController: NSObject, ObservableObject, AVAudioPlayerDelegate {
             if active.currentTime >= fadeDuration { finishCrossfade() }
             return
         }
-        guard let next = queued else { return }
+        guard let next = nextPlaybackTrack else { return }
         let remaining = active.duration - active.currentTime
         // Bound overlap for short tracks; never overlap three players.
         let window = min(3, active.duration / 4, (next.durationSeconds ?? 12) / 4)
@@ -255,13 +270,13 @@ final class RadioController: NSObject, ObservableObject, AVAudioPlayerDelegate {
             guard incoming.play() else { throw RadioFailure("Could not start the next track") }
             fadingPlayer = active
             fadeDuration = min(remaining, incoming.duration / 4)
+            consumeNext(previous: current)
             player = incoming; current = next; total = incoming.duration
-            queued = reserve; reserve = nil
             applyPlaybackVolumes()
         } catch {
             // Leave the current song playing; discard only the unreadable queue entry.
             self.error = error.localizedDescription
-            queued = reserve; reserve = nil
+            discardNext()
         }
     }
     func togglePause() {
@@ -269,13 +284,75 @@ final class RadioController: NSObject, ObservableObject, AVAudioPlayerDelegate {
         if paused { player.play(); fadingPlayer?.play() } else { player.pause(); fadingPlayer?.pause() }
         paused.toggle(); saveUsage()
     }
+    var canGoBack: Bool { !trail.back.isEmpty }
+    var nextPlaybackTrack: SavedTrack? { trail.forward.last ?? queued }
+    private func consumeNext(previous: SavedTrack?) {
+        if !trail.forward.isEmpty { trail.next(from: previous) }
+        else { trail.record(previous); queued = reserve; reserve = nil }
+    }
+    private func discardNext() {
+        if !trail.forward.isEmpty { trail.discardMissingNext() }
+        else { queued = reserve; reserve = nil }
+    }
+    func previous() {
+        let old = current
+        while let track = trail.back.last {
+            do {
+                try play(track, recordHistory: false)
+                trail.previous(from: old)
+                if !running { status = "Playing recording" }
+                return
+            } catch { trail.discardMissingPrevious() }
+        }
+        error = "The previous recording is no longer available."
+    }
     func skip() {
+        let old = current
+        while let next = nextPlaybackTrack {
+            do {
+                try play(next, recordHistory: false)
+                consumeNext(previous: old)
+                if !running { status = "Playing recording" }
+                return
+            } catch { self.error = error.localizedDescription; discardNext() }
+        }
         finishCrossfade()
         player?.stop(); player = nil; paused = false; elapsed = 0; total = 0
-        if let next = queued {
-            queued = reserve; reserve = nil
-            do { try play(next) } catch { self.error = error.localizedDescription }
-        } else { current = nil; if running { status = "Waiting for the next track" } }
+        trail.record(old); current = nil
+        status = running ? "Waiting for the next track" : "Recording finished"
+    }
+    func playRecording(_ track: SavedTrack) {
+        let wasEmpty = current == nil
+        do {
+            try play(track)
+            if wasEmpty {
+                trail.seed(older: history.filter { $0.date < track.date && $0.id != track.id }.sorted { $0.date < $1.date })
+            }
+            error = nil
+            if !running { status = "Playing recording" }
+        } catch { self.error = "Could not play this recording. It may have been moved or deleted." }
+    }
+    func matchingRecordings() -> [SavedTrack] {
+        history.filter { track in
+            guard FileManager.default.fileExists(atPath: track.path) else { return false }
+            if track.generationSettings != nil { return track.matches(settings) }
+            guard settings.matchesLegacyPrompt(track.prompt),
+                  let data = try? Data(contentsOf: TrackFiles.sidecar(URL(fileURLWithPath: track.path), extension: "request.json")),
+                  let request = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return false }
+            return track.matches(settings, legacyRequestedDuration: request["duration_seconds"] as? Int)
+        }.sorted { $0.date > $1.date }
+    }
+    @discardableResult func resumeLatestMatchingRecording() -> Bool {
+        let candidates = matchingRecordings()
+        for (index, track) in candidates.enumerated() {
+            do {
+                try play(track, recordHistory: false)
+                trail.seed(older: Array(candidates.dropFirst(index + 1).reversed()))
+                status = "Playing your latest recording"
+                return true
+            } catch { continue } // Try the next saved file if a recording is unreadable.
+        }
+        return false
     }
     func seek(_ seconds: TimeInterval) { finishCrossfade(); player?.currentTime = min(max(0, seconds), total); elapsed = player?.currentTime ?? 0 }
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
@@ -288,7 +365,7 @@ final class RadioController: NSObject, ObservableObject, AVAudioPlayerDelegate {
         runID = UUID(); task?.cancel(); task = nil
         finishCrossfade()
         player?.stop(); player = nil; engine.stop()
-        running = false; downloading = false; paused = false; current = nil; queued = nil; reserve = nil
+        running = false; downloading = false; paused = false; current = nil; queued = nil; reserve = nil; trail = PlaybackTrail()
         elapsed = 0; total = 0; generationProgress = nil; status = "Radio stopped · releasing memory"
         saveUsage(); sampleResources(); refreshModel()
     }

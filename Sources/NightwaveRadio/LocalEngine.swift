@@ -158,7 +158,9 @@ final class LocalEngine {
                         try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: TrackFiles.sidecar(output, extension: "transfer.json"), options: .atomic)
                     }
                     try JSONSerialization.data(withJSONObject: body, options: [.prettyPrinted, .sortedKeys]).write(to: TrackFiles.sidecar(output, extension: "request.json"), options: .atomic)
-                    return SavedTrack(title: settings.station.title + " · " + String(index + 1), path: output.path, prompt: settings.prompt(index: index, salt: salt, attempt: attempt), seed: seed)
+                    var track = SavedTrack(title: settings.station.title + " · " + String(index + 1), path: output.path, prompt: settings.prompt(index: index, salt: salt, attempt: attempt), seed: seed)
+                    track.generationSettings = settings
+                    return track
                 }.value
                 return saved
             default: break

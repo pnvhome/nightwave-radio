@@ -77,4 +77,76 @@ final class CrossfadeTests: XCTestCase {
         XCTAssertNil(radio.fadingPlayer)
         XCTAssertLessThan(radio.player!.currentTime, 0.5)
     }
+    func testRestartPlaysLatestMatchingRecordingWithoutLoadingModel() throws {
+        let (radio, first, next, root) = try fixture()
+        defer { radio.stop(); try? FileManager.default.removeItem(at: root) }
+        var older = first, latest = next
+        older.generationSettings = radio.settings; latest.generationSettings = radio.settings
+        older.date = Date(timeIntervalSince1970: 1); latest.date = Date(timeIntervalSince1970: 2)
+        var wrong = latest; wrong.id = UUID(); wrong.date = Date(timeIntervalSince1970: 3)
+        wrong.generationSettings?.space.toggle()
+        let history = [wrong, latest, older]
+        try JSONEncoder().encode(history).write(to: root.appendingPathComponent("history.json"))
+        let restarted = RadioController(dataDirectory: root, tracksDirectory: root, modelURL: root.appendingPathComponent("no-model"))
+        defer { restarted.stop() }
+        restarted.settings.volume = 0.2
+        let count = restarted.usage.tracks
+        restarted.start()
+        XCTAssertEqual(restarted.current?.id, latest.id)
+        XCTAssertTrue(restarted.player?.isPlaying == true)
+        XCTAssertFalse(restarted.running)
+        XCTAssertNil(restarted.engine.processID)
+        XCTAssertEqual(restarted.history.count, 3)
+        XCTAssertEqual(restarted.usage.tracks, count)
+        XCTAssertTrue(restarted.canGoBack)
+    }
+    func testLegacySidecarAndUnreadableLatestFallback() throws {
+        let (radio, first, next, root) = try fixture()
+        defer { radio.stop(); try? FileManager.default.removeItem(at: root) }
+        var legacy = first
+        legacy.prompt = radio.settings.prompt(index: 0, salt: 2)
+        legacy.date = Date(timeIntervalSince1970: 1)
+        let request = TrackFiles.sidecar(URL(fileURLWithPath: legacy.path), extension: "request.json")
+        try JSONSerialization.data(withJSONObject: ["duration_seconds": 180]).write(to: request)
+        var damaged = next; damaged.generationSettings = radio.settings
+        damaged.path = root.appendingPathComponent("broken.m4a").path
+        try Data("broken".utf8).write(to: URL(fileURLWithPath: damaged.path))
+        damaged.date = Date(timeIntervalSince1970: 2)
+        radio.history = [damaged, legacy]
+        XCTAssertTrue(radio.resumeLatestMatchingRecording())
+        XCTAssertEqual(radio.current?.id, legacy.id)
+        radio.stop(); radio.settings.duration = 120
+        XCTAssertFalse(radio.resumeLatestMatchingRecording())
+    }
+    func testBackForwardAndLibrarySelectionPreserveGeneratedQueue() throws {
+        let (radio, first, next, root) = try fixture()
+        defer { radio.stop(); try? FileManager.default.removeItem(at: root) }
+        var generated = next; generated.id = UUID(); generated.title = "Generated"
+        try radio.play(first); try radio.play(next); radio.queued = generated
+        radio.previous()
+        XCTAssertEqual(radio.current?.id, first.id)
+        XCTAssertEqual(radio.nextPlaybackTrack?.id, next.id)
+        XCTAssertEqual(radio.queued?.id, generated.id)
+        radio.skip()
+        XCTAssertEqual(radio.current?.id, next.id)
+        XCTAssertEqual(radio.queued?.id, generated.id)
+        radio.playRecording(first)
+        XCTAssertEqual(radio.current?.id, first.id)
+        XCTAssertEqual(radio.queued?.id, generated.id)
+        XCTAssertNil(radio.engine.processID)
+        radio.skip()
+        XCTAssertEqual(radio.current?.id, generated.id)
+        XCTAssertNil(radio.queued)
+    }
+    func testCrossfadeAfterBackUsesForwardHistoryBeforeGeneratedTrack() async throws {
+        let (radio, first, next, root) = try fixture()
+        defer { radio.stop(); try? FileManager.default.removeItem(at: root) }
+        var generated = next; generated.id = UUID()
+        try radio.play(first); try radio.play(next); radio.queued = generated
+        radio.previous(); radio.seek(6.2)
+        try await waitForFade(radio)
+        XCTAssertEqual(radio.current?.id, next.id)
+        XCTAssertEqual(radio.queued?.id, generated.id)
+    }
+
 }

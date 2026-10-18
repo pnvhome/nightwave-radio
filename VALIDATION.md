@@ -70,3 +70,15 @@ The final bundled app passed a live three-track queue test: paused playback whil
 Automatic transitions overlap the outgoing and queued audio for up to three seconds, bounded to one quarter of either track's duration. Complementary linear gains follow the current volume control. Pausing freezes both players; seeking, manual skipping and stopping dispose of the outgoing player. A completion callback from the outgoing player cannot skip the new track. When no next track is ready, playback follows the existing end-of-track behavior. Model generation and saved audio are unchanged.
 
 Validation: 26 core tests and 3 audio integration tests passed on the development Mac with `NIGHTWAVE_AUDIO_TESTS=1 swift test`. Silent local fixtures exercise real AVAudioPlayer overlap, queue consumption, pause/resume, volume changes, outgoing completion, seek, immediate manual skip, missing queue and stopping both players. Audio-device tests are opt-in for headless CI. Audible smoothness across actual generated songs still needs listening feedback.
+
+### Recording playback and warm start (build 15)
+
+Start radio attempts the newest readable matching recording before preparing the model. New recordings persist a generation-settings snapshot; legacy recordings require an exact generated prompt and matching requested duration from their request sidecar. Volume is excluded. Unknown settings, absent files and unreadable audio are not treated as valid matches. Replays do not create duplicate history entries or increment generation statistics.
+
+Previous/Next navigation uses a separate playback trail and preserves the generated queue. Manual recording selection leaves active radio generation running; offline selection starts only the audio player. The Recordings page has play buttons, and the player offers a searchable recording popover. Automatic crossfades also respect forward navigation history.
+
+Validation: 30 core tests and 7 real audio-player integration tests passed with NIGHTWAVE_AUDIO_TESTS=1. Tests cover metadata backward compatibility, settings and duration mismatches, restart recovery without a model, legacy sidecars, unreadable newest-file fallback, back/forward navigation, generated-queue preservation, and crossfade after navigating back. The backend and model generation algorithm are unchanged.
+
+Installed-app UI checks confirmed that the searchable recording popover lists existing recordings, selection starts playback immediately, Previous selects the preceding saved track, and the Recordings page exposes play buttons. Existing user recordings and their metadata were retained.
+
+After installing and reopening build 15, Start radio immediately played the latest matching existing Ambient recording while the UI showed model loading. The installed app passed strict signature verification.

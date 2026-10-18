@@ -11,6 +11,8 @@ struct RadioView: View {
     @State private var showHistory = false
     @State private var showStats = false
     @State private var showAbout = false
+    @State private var showRecordingPicker = false
+    @State private var recordingSearch = ""
     var body: some View {
         HStack(spacing: 0) {
             sidebar.frame(width: 216)
@@ -190,8 +192,18 @@ struct RadioView: View {
                 }
                 Spacer(minLength: 8)
                 if radio.current != nil {
+                    Button { radio.previous() } label: { Image(systemName: "backward.end.fill").font(.system(size: 15)) }
+                        .buttonStyle(.plain).help("Previous track").accessibilityLabel("Previous track").disabled(!radio.canGoBack)
                     Button { radio.togglePause() } label: { Image(systemName: radio.paused ? "play.fill" : "pause.fill").font(.system(size: 17)).frame(width: 40, height: 40) }.buttonStyle(.plain)
                     Button { radio.skip() } label: { Image(systemName: "forward.end.fill").font(.system(size: 15)) }.buttonStyle(.plain).help("Next track")
+                }
+                if !radio.history.isEmpty {
+                    Button { showRecordingPicker.toggle() } label: { Image(systemName: "music.note.list").font(.system(size: 16)) }
+                        .buttonStyle(.plain).help("Choose a recording").accessibilityLabel("Choose a recording")
+                        .popover(isPresented: $showRecordingPicker) { recordingPicker }
+                }
+                if !radio.busy && radio.current != nil {
+                    Button("Start radio") { radio.start() }.buttonStyle(.plain).foregroundStyle(accent)
                 }
                 if radio.busy || radio.current != nil {
                     Button { radio.stop() } label: { Label("Stop", systemImage: "stop.fill").font(.system(size: 11)).padding(.horizontal, 16).padding(.vertical, 12).background(panel, in: Capsule()) }.buttonStyle(.plain).help("Stop the radio and release model memory")
@@ -199,7 +211,7 @@ struct RadioView: View {
                     Button { radio.start() } label: {
                         Label("Start radio", systemImage: "play.fill").font(.system(size: 12, weight: .semibold))
                             .padding(.horizontal, 21).padding(.vertical, 13).background(accent, in: Capsule()).foregroundStyle(.white)
-                    }.buttonStyle(.plain).disabled(!radio.modelAvailable)
+                    }.buttonStyle(.plain)
                 }
             }
             if radio.current != nil {
@@ -212,7 +224,7 @@ struct RadioView: View {
                 }.font(.system(size: 9)).foregroundStyle(.white.opacity(0.35))
             }
             HStack {
-                Text(radio.queued == nil ? "Tracks are saved automatically" : "Up next: \(radio.queued!.title)")
+                Text(radio.nextPlaybackTrack == nil ? "Tracks are saved automatically" : "Up next: \(radio.nextPlaybackTrack!.title)")
                 Spacer()
                 Button("Open recordings folder ↗") { radio.openTracks() }.buttonStyle(.plain)
             }.font(.system(size: 9)).foregroundStyle(.white.opacity(0.3))
@@ -304,7 +316,9 @@ struct RadioView: View {
             }
             ForEach(radio.history) { track in
                 HStack(spacing: 14) {
-                    Image(systemName: "waveform").foregroundStyle(accent).frame(width: 28)
+                    Button { radio.playRecording(track) } label: {
+                        Image(systemName: radio.current?.id == track.id ? "speaker.wave.2.fill" : "play.fill").foregroundStyle(accent).frame(width: 28, height: 32)
+                    }.buttonStyle(.plain).help("Play recording").accessibilityLabel("Play " + track.title)
                     VStack(alignment: .leading, spacing: 5) {
                         Text(track.title).fontWeight(.medium)
                         Text(track.date.formatted(date: .abbreviated, time: .shortened)).font(.system(size: 10)).foregroundStyle(.secondary)
@@ -314,6 +328,33 @@ struct RadioView: View {
                 }.padding(15).background(panel, in: RoundedRectangle(cornerRadius: 12))
             }
         }
+    }
+    private var recordingPicker: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack { Text("Your recordings").font(.headline); Spacer(); Text("\(radio.history.count)").foregroundStyle(.secondary) }
+            TextField("Search recordings", text: $recordingSearch).textFieldStyle(.roundedBorder)
+            ScrollView {
+                LazyVStack(spacing: 6) {
+                    ForEach(radio.history.filter { recordingSearch.isEmpty || $0.title.localizedCaseInsensitiveContains(recordingSearch) }) { track in
+                        Button {
+                            radio.playRecording(track)
+                            showRecordingPicker = false
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: radio.current?.id == track.id ? "speaker.wave.2.fill" : "play.fill").foregroundStyle(accent)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(track.title).lineLimit(1)
+                                    Text(track.date.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if let duration = track.durationSeconds { Text(time(duration)).font(.caption).monospacedDigit().foregroundStyle(.secondary) }
+                            }.padding(10).background(panel, in: RoundedRectangle(cornerRadius: 8))
+                        }.buttonStyle(.plain)
+                    }
+                }
+            }
+            Text("Play saved music instantly. Active radio keeps preparing new tracks.").font(.caption).foregroundStyle(.secondary)
+        }.padding(18).frame(width: 380, height: 420).background(ink).foregroundStyle(.white.opacity(0.9)).preferredColorScheme(.dark)
     }
     private func errorCard(_ message: String) -> some View {
         HStack(alignment: .top, spacing: 12) {
