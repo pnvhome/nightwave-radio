@@ -111,9 +111,9 @@ struct NightwaveRadioApp: App {
             try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             let engine = LocalEngine(dataDirectory: root)
             do {
-                try await engine.prepare(model: ModelLibrary.defaultURL)
+                try await engine.prepare(model: ModelLibrary.preferredURL())
                 var settings = RadioSettings(); settings.duration = 5
-                let track = try await engine.generate(settings: settings, model: ModelLibrary.defaultURL, index: 0, salt: 1, output: root.appendingPathComponent("test.m4a")) { _, _ in }
+                let track = try await engine.generate(settings: settings, model: ModelLibrary.preferredURL(), index: 0, salt: 1, output: root.appendingPathComponent("test.m4a")) { _, _ in }
                 engine.stop()
                 try "PASS: bundled engine, installed YuE2, instrumental LoRA, full-score generation\n\(track.path)\n".write(to: root.appendingPathComponent("result.txt"), atomically: true, encoding: .utf8)
                 print("SMOKE PASS: \(root.path)")

@@ -1,5 +1,7 @@
 # Nightwave Radio
 
+<img src="docs/icon.png" alt="Nightwave Radio icon" width="112">
+
 **A local, instrumental AI radio for Apple Silicon Macs.** Choose a mood, shape the sound, and let YuE2 compose your next track while the current one plays.
 
 Nightwave is a native SwiftUI app with a dark interface. Music generation runs on your Mac through an embedded MLX-Serve engine. No account, subscription, cloud inference, or separate chat model is required.
