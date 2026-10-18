@@ -4,6 +4,14 @@
 
 **A local, instrumental AI radio for Apple Silicon Macs.** Choose a mood, shape the sound, and let YuE2 compose your next track while the current one plays.
 
+## [⬇ Download for Mac — DMG](https://github.com/pnvhome/nightwave-radio/releases/download/v1.3.0/Nightwave-Radio-1.3.0-Apple-Silicon.dmg)
+
+**Version 1.3.0 · Public Beta · Apple Silicon M1 or newer · macOS 26.2+**
+
+Download the ready-to-use app above — no coding or build tools needed. Open the DMG, drag **Nightwave Radio** into **Applications**, then open it and download the music model.
+
+[Installation help](#install) · [Release notes and all downloads](https://github.com/pnvhome/nightwave-radio/releases)
+
 Nightwave is a native SwiftUI app with a dark interface. Music generation runs on your Mac through an embedded MLX-Serve engine. No account, subscription, cloud inference, or separate chat model is required.
 
 > **Non-commercial use:** the application source is MIT, but YuE2 and the included instrumental LoRA are CC BY-NC 4.0. Read [third-party notices](THIRD_PARTY_NOTICES.md) before using or redistributing the complete application.
@@ -31,7 +39,11 @@ The build targets Apple M1, but has not been tested on every chip and OS combina
 
 ## Install
 
-Download the DMG from this repository's **Releases**, open it, and drag **Nightwave Radio** into Applications. Open the app and download the model, or choose a compatible model already on disk.
+1. [Download Nightwave Radio for Mac (.dmg)](https://github.com/pnvhome/nightwave-radio/releases/download/v1.3.0/Nightwave-Radio-1.3.0-Apple-Silicon.dmg).
+2. Open the DMG and drag **Nightwave Radio** into **Applications**.
+3. Launch the app, click **Download model** (about 5 GB), choose a station, and click **Start radio**. If you already have a compatible model, use **Choose model folder** instead.
+
+You do not need to download the source-code ZIP or install MLX-Serve separately.
 
 This community beta is ad-hoc signed, **not Developer ID signed or notarized**. macOS may block the first launch. If you trust the download, follow [Apple's instructions for opening an app from an unidentified developer](https://support.apple.com/102445). Do not disable Gatekeeper globally.
 
