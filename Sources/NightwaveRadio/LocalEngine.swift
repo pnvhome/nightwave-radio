@@ -145,8 +145,6 @@ final class LocalEngine {
                 let step = (event["step"] as? NSNumber)?.doubleValue ?? 0
                 progress(names[stage] ?? "Creating music", total > 0 ? min(1, step / total) : nil)
             case "complete":
-                if settings.station == .ambient, let score = event["abc"] as? String,
-                   ScoreQuality.hasDominantMelodicLoop(score) { throw ScoreQuality.Repetitive() }
                 guard let base64 = event["data"] as? String else { throw RadioFailure("The engine returned an empty track.") }
                 let saved = try await Task.detached(priority: .userInitiated) {
                     guard let wav = Data(base64Encoded: base64), wav.count > 44 else { throw RadioFailure("The audio file is damaged.") }

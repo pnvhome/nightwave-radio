@@ -245,8 +245,8 @@ final class ScoreQualityTests: XCTestCase {
         XCTAssertFalse(ScoreQuality.hasDominantMelodicLoop(score(Array(repeating: "z8|C8|C8|z8|", count: 20))))
         XCTAssertFalse(ScoreQuality.hasDominantMelodicLoop(score(Array(repeating: "CDEFGABc|C8|D8|E8|", count: 3))))
     }
-    func testRepetitiveScoresUseBoundedRetry() {
-        XCTAssertTrue(GenerationRetry.shouldRetry(ScoreQuality.Repetitive().localizedDescription, completedAttempts: 1))
+    func testMusicalRepetitionDoesNotTriggerExpensiveRegeneration() {
+        XCTAssertFalse(GenerationRetry.shouldRetry(ScoreQuality.Repetitive().localizedDescription, completedAttempts: 1))
         XCTAssertFalse(GenerationRetry.shouldRetry(ScoreQuality.Repetitive().localizedDescription, completedAttempts: 3))
     }
 }
@@ -266,5 +266,21 @@ final class ConsecutiveScoreLoopTests: XCTestCase {
         XCTAssertFalse(ScoreQuality.hasDominantMelodicLoop(score(changingHarmony: false, count: 7)))
         XCTAssertFalse(ScoreQuality.hasDominantMelodicLoop(score(changingHarmony: false, variationAt: 4, count: 12)))
         XCTAssertFalse(ScoreQuality.hasDominantMelodicLoop(score(changingHarmony: true, count: 20)))
+    }
+}
+
+final class PlaybackContinuityRetryTests: XCTestCase {
+    @MainActor func testMusicalQualityFailureCannotLaunchAnotherFullGeneration() async {
+        var generations = 0
+        do {
+            let _: Int = try await GenerationRetry.perform(operation: {
+                generations += 1
+                throw ScoreQuality.Repetitive()
+            })
+            XCTFail("Expected error")
+        } catch {
+            XCTAssertTrue(error is ScoreQuality.Repetitive)
+            XCTAssertEqual(generations, 1)
+        }
     }
 }

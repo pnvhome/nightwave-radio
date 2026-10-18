@@ -30,3 +30,7 @@ The public beta still needs independent clean-Mac installation and full download
 ### Refined repetition policy
 
 The earlier frequency-based rule was too strict for recurring themes. The local candidate now rejects only eight consecutive identical four-bar phrases, including unchanged harmony. Intervening melodic or harmonic changes reset the run; ordinary returning themes and shorter repeats pass. This still cannot observe timbre or arrangement changes that are absent from the symbolic score.
+
+### Playback continuity takes priority (build 11)
+
+Removed the post-synthesis score-quality gate from live generation. Completed audio is no longer discarded and regenerated because of melodic repetition. The symbolic checker remains an offline diagnostic helper only. Automatic retries are limited to invalid/truncated instrumental plans that fail before synthesis. This avoids multiplying full-track generation time but does not guarantee uninterrupted playback when the model itself generates too slowly. A regression test verifies that musical-quality errors cannot cause additional full-generation attempts.

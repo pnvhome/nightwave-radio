@@ -3,7 +3,7 @@ import Foundation
 public enum GenerationRetry {
     public static let maximumAttempts = 3
     public static func isScoreFailure(_ message: String) -> Bool {
-        message.contains("Instrumental score repeats the same melodic phrase too often") || message.contains("Instrumental score validation failed") || message.contains("Instrumental score planning was truncated")
+        message.contains("Instrumental score validation failed") || message.contains("Instrumental score planning was truncated")
     }
     public static func shouldRetry(_ message: String, completedAttempts: Int) -> Bool {
         completedAttempts > 0 && completedAttempts < maximumAttempts && isScoreFailure(message)
