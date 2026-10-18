@@ -4,9 +4,9 @@
 
 **A local, instrumental AI radio for Apple Silicon Macs.** Choose a mood, shape the sound, and let YuE2 compose your next track while the current one plays.
 
-## [⬇ Download for Mac — DMG](https://github.com/pnvhome/nightwave-radio/releases/download/v1.3.0/Nightwave-Radio-1.3.0-Apple-Silicon.dmg)
+## [⬇ Download for Mac — DMG](https://github.com/pnvhome/nightwave-radio/releases/download/v1.3.1/Nightwave-Radio-1.3.1-Apple-Silicon.dmg)
 
-**Version 1.3.0 · Public Beta · Apple Silicon M1 or newer · macOS 26.2+**
+**Version 1.3.1 · Public Beta · Apple Silicon M1 or newer · macOS 26.2+**
 
 Download the ready-to-use app above — no coding or build tools needed. Open the DMG, drag **Nightwave Radio** into **Applications**, then open it and download the music model.
 
@@ -21,11 +21,22 @@ Nightwave is a native SwiftUI app with a dark interface. Music generation runs o
 - Six stations: Lo-Fi Lounge, Quiet Instrumental, Cyberpunk City, Synthwave Drive, Ambient Space, and Your Station.
 - Vinyl, soft beats, beatless textures, space, and darker moods; an optional custom description.
 - Instrumental AR LoRA plus the official YuE2 Music Skill score transformation, applied locally.
-- Continuous playback with one track prepared ahead, pause, skip, seek, and volume controls.
+- Smooth automatic transitions with up to three seconds of crossfade.
+- Instant start from a matching saved track while new music is generated.
+- Previous/Next controls, a searchable recording picker, and playback from the Recordings list.
+- A track prepared ahead, with an extra reserve for short tracks; pause, seek, and volume controls.
 - Automatic M4A/AAC recording at 256 kb/s, with scores and generation metadata saved alongside.
 - Download progress, model-folder selection, and a Finder shortcut.
 - Local listening/generation statistics, CPU, memory, whole-Mac GPU, and disk usage.
 - Stop releases the app's own music engine. It does not load a Qwen chat model.
+
+## Playback and saved tracks
+
+Automatic track transitions use a fade of up to three seconds when the next track is ready. Short tracks use a shorter overlap. Manual skipping remains immediate. Recordings are saved without the playback fade.
+
+Start radio immediately plays the newest readable recording made with matching station, sound options, description and requested duration, while YuE2 loads and creates new music. Volume is excluded from matching. Older recordings use their saved request metadata; uncertain matches are skipped.
+
+Use Previous and Next to navigate playback without losing newly generated queued tracks. The player’s recording picker includes search, and every row in Recordings has a play button. Saved tracks can play without loading or installing the model; selecting one during an active radio session keeps generation running. Replaying a recording does not add it to history again or count it as a newly generated track.
 
 ## Requirements
 
@@ -39,11 +50,13 @@ The build targets Apple M1, but has not been tested on every chip and OS combina
 
 ## Install
 
-1. [Download Nightwave Radio for Mac (.dmg)](https://github.com/pnvhome/nightwave-radio/releases/download/v1.3.0/Nightwave-Radio-1.3.0-Apple-Silicon.dmg).
+1. [Download Nightwave Radio for Mac (.dmg)](https://github.com/pnvhome/nightwave-radio/releases/download/v1.3.1/Nightwave-Radio-1.3.1-Apple-Silicon.dmg).
 2. Open the DMG and drag **Nightwave Radio** into **Applications**.
 3. Launch the app, click **Download model** (about 5 GB), choose a station, and click **Start radio**. If you already have a compatible model, use **Choose model folder** instead.
 
 You do not need to download the source-code ZIP or install MLX-Serve separately.
+
+**Updating:** quit Nightwave Radio, replace the app in Applications, and reopen it. Keep your existing model, settings and recordings; there is no need to download the model again.
 
 This community beta is ad-hoc signed, **not Developer ID signed or notarized**. macOS may block the first launch. If you trust the download, follow [Apple's instructions for opening an app from an unidentified developer](https://support.apple.com/102445). Do not disable Gatekeeper globally.
 
@@ -85,11 +98,3 @@ No analytics or cloud inference. Downloads contact Hugging Face and its file-del
 ## Credits
 
 Built on [MLX-Serve](https://github.com/ddalcu/mlx-serve), [YuE2](https://huggingface.co/m-a-p/YuE2-3B), the [official YuE Music Skill](https://github.com/multimodal-art-projection/YuE/tree/main/skills/yue2-music), [Mothersuperior's instrumental AR LoRA](https://huggingface.co/Mothersuperior/YuE2-instrumental-cot-full-loras), and [MLX](https://github.com/ml-explore/mlx). Independent project; no endorsement implied.
-
-Automatic track transitions use a fade of up to three seconds when the next track is ready. Short tracks use a shorter overlap. Manual skipping remains immediate. Recordings are saved without the playback fade.
-
-On a Mac with an audio output device, run playback integration tests with `NIGHTWAVE_AUDIO_TESTS=1 swift test --filter CrossfadeTests`. These use silent local fixtures and do not load a music model.
-
-Start radio immediately plays the newest readable recording made with matching station, sound options, description and requested duration, while YuE2 loads and creates new music. Volume is excluded from matching. Older recordings use their saved request metadata; uncertain matches are skipped.
-
-Use Previous and Next to navigate playback without losing newly generated queued tracks. The player’s recording picker includes search, and every row in Recordings has a play button. Saved tracks can play without loading or installing the model; selecting one during an active radio session keeps generation running. Replaying a recording does not add it to history again or count it as a newly generated track.
