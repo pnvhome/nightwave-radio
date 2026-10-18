@@ -5,7 +5,7 @@ import RadioCore
 
 @MainActor
 final class RadioController: NSObject, ObservableObject, AVAudioPlayerDelegate {
-    @Published var settings = RadioSettings() { didSet { saveSettings(); player?.volume = settings.volume } }
+    @Published var settings = RadioSettings() { didSet { saveSettings(); applyPlaybackVolumes() } }
     @Published var running = false
     @Published var downloading = false
     @Published var downloadProgress = ModelDownloadProgress(directory: ModelLibrary.defaultURL)
@@ -35,7 +35,9 @@ final class RadioController: NSObject, ObservableObject, AVAudioPlayerDelegate {
     let tracksDirectory: URL
     let engine: LocalEngine
     private var modelURL: URL = ModelLibrary.defaultURL
-    private var player: AVAudioPlayer?
+    private(set) var player: AVAudioPlayer?
+    private(set) var fadingPlayer: AVAudioPlayer?
+    private var fadeDuration: TimeInterval = 0
     private var task: Task<Void, Never>?
     private var timer: Timer?
     private var runID = UUID()
@@ -74,7 +76,7 @@ final class RadioController: NSObject, ObservableObject, AVAudioPlayerDelegate {
         }
         refreshModel()
         sampleResources()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
     }
@@ -85,6 +87,7 @@ final class RadioController: NSObject, ObservableObject, AVAudioPlayerDelegate {
             usage.listeningSeconds += delta; sessionUsage.listeningSeconds += delta
         }
         lastPlaybackTick = now
+        updateCrossfade()
         elapsed = player?.currentTime ?? 0
         if now - lastResourceSample >= 2 {
             if downloading { downloadProgress = ModelDownloadProgress(directory: ModelLibrary.defaultURL) }
@@ -212,26 +215,69 @@ final class RadioController: NSObject, ObservableObject, AVAudioPlayerDelegate {
             self.generationProgress = nil
         })
     }
-    private func play(_ track: SavedTrack) throws {
+    func play(_ track: SavedTrack) throws {
         let audio = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: track.path))
         audio.delegate = self; audio.volume = settings.volume
         audio.prepareToPlay()
         guard audio.play() else { throw RadioFailure("Could not start playback. Check your audio output device.") }
         player = audio; current = track; elapsed = 0; total = audio.duration; paused = false
     }
+    private func applyPlaybackVolumes() {
+        guard fadingPlayer != nil, let player, fadeDuration > 0 else {
+            player?.volume = settings.volume
+            return
+        }
+        // Linear complementary gains avoid boosting overlapping loud tracks.
+        let fraction = Float(min(1, max(0, player.currentTime / fadeDuration)))
+        player.volume = settings.volume * fraction
+        fadingPlayer?.volume = settings.volume * (1 - fraction)
+    }
+    private func finishCrossfade() {
+        fadingPlayer?.stop(); fadingPlayer = nil; fadeDuration = 0
+        player?.volume = settings.volume
+    }
+    private func updateCrossfade() {
+        guard !paused, let active = player, active.isPlaying else { return }
+        if fadingPlayer != nil {
+            applyPlaybackVolumes()
+            if active.currentTime >= fadeDuration { finishCrossfade() }
+            return
+        }
+        guard let next = queued else { return }
+        let remaining = active.duration - active.currentTime
+        // Bound overlap for short tracks; never overlap three players.
+        let window = min(3, active.duration / 4, (next.durationSeconds ?? 12) / 4)
+        guard remaining > 0, remaining <= window else { return }
+        do {
+            let incoming = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: next.path))
+            incoming.delegate = self; incoming.volume = 0
+            incoming.prepareToPlay()
+            guard incoming.play() else { throw RadioFailure("Could not start the next track") }
+            fadingPlayer = active
+            fadeDuration = min(remaining, incoming.duration / 4)
+            player = incoming; current = next; total = incoming.duration
+            queued = reserve; reserve = nil
+            applyPlaybackVolumes()
+        } catch {
+            // Leave the current song playing; discard only the unreadable queue entry.
+            self.error = error.localizedDescription
+            queued = reserve; reserve = nil
+        }
+    }
     func togglePause() {
         guard let player else { return }
-        if paused { player.play() } else { player.pause() }
+        if paused { player.play(); fadingPlayer?.play() } else { player.pause(); fadingPlayer?.pause() }
         paused.toggle(); saveUsage()
     }
     func skip() {
+        finishCrossfade()
         player?.stop(); player = nil; paused = false; elapsed = 0; total = 0
         if let next = queued {
             queued = reserve; reserve = nil
             do { try play(next) } catch { self.error = error.localizedDescription }
         } else { current = nil; if running { status = "Waiting for the next track" } }
     }
-    func seek(_ seconds: TimeInterval) { player?.currentTime = min(max(0, seconds), total); elapsed = player?.currentTime ?? 0 }
+    func seek(_ seconds: TimeInterval) { finishCrossfade(); player?.currentTime = min(max(0, seconds), total); elapsed = player?.currentTime ?? 0 }
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         Task { @MainActor in
             guard self.player === player else { return }
@@ -240,6 +286,7 @@ final class RadioController: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
     func stop() {
         runID = UUID(); task?.cancel(); task = nil
+        finishCrossfade()
         player?.stop(); player = nil; engine.stop()
         running = false; downloading = false; paused = false; current = nil; queued = nil; reserve = nil
         elapsed = 0; total = 0; generationProgress = nil; status = "Radio stopped · releasing memory"

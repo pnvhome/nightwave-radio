@@ -85,3 +85,7 @@ No analytics or cloud inference. Downloads contact Hugging Face and its file-del
 ## Credits
 
 Built on [MLX-Serve](https://github.com/ddalcu/mlx-serve), [YuE2](https://huggingface.co/m-a-p/YuE2-3B), the [official YuE Music Skill](https://github.com/multimodal-art-projection/YuE/tree/main/skills/yue2-music), [Mothersuperior's instrumental AR LoRA](https://huggingface.co/Mothersuperior/YuE2-instrumental-cot-full-loras), and [MLX](https://github.com/ml-explore/mlx). Independent project; no endorsement implied.
+
+Automatic track transitions use a fade of up to three seconds when the next track is ready. Short tracks use a shorter overlap. Manual skipping remains immediate. Recordings are saved without the playback fade.
+
+On a Mac with an audio output device, run playback integration tests with `NIGHTWAVE_AUDIO_TESTS=1 swift test --filter CrossfadeTests`. These use silent local fixtures and do not load a music model.

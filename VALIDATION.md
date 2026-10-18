@@ -64,3 +64,9 @@ Shortened tracks also trigger one extra ready-track reserve when their duration 
 The final Swift suite passes 26 tests, including short-track reserve policy and the measured generation budget.
 
 The final bundled app passed a live three-track queue test: paused playback while filling the reserve, FIFO reserve promotion on manual skip, automatic transition, stop/cancellation, usage persistence and resource counters. Bundle audit and strict signature verification passed. Public release remains deferred pending listening feedback.
+
+### Automatic playback crossfade (build 14)
+
+Automatic transitions overlap the outgoing and queued audio for up to three seconds, bounded to one quarter of either track's duration. Complementary linear gains follow the current volume control. Pausing freezes both players; seeking, manual skipping and stopping dispose of the outgoing player. A completion callback from the outgoing player cannot skip the new track. When no next track is ready, playback follows the existing end-of-track behavior. Model generation and saved audio are unchanged.
+
+Validation: 26 core tests and 3 audio integration tests passed on the development Mac with `NIGHTWAVE_AUDIO_TESTS=1 swift test`. Silent local fixtures exercise real AVAudioPlayer overlap, queue consumption, pause/resume, volume changes, outgoing completion, seek, immediate manual skip, missing queue and stopping both players. Audio-device tests are opt-in for headless CI. Audible smoothness across actual generated songs still needs listening feedback.
