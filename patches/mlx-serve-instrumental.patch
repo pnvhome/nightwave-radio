@@ -1,0 +1,1649 @@
+diff --git a/NOTICE b/NOTICE
+index eafbfe5..b1a968e 100644
+--- a/NOTICE
++++ b/NOTICE
+@@ -692,3 +692,21 @@ and they are listed because they made that work possible.
+ 
+ Model weights downloaded at runtime carry their own licenses from their
+ publishers. mlx-serve does not redistribute them.
++
++YuE2 instrumental score transformation
++  src/yue2_instrumental/{abc_tools,common,compile_score,instrumentalize}.py
++  are unmodified copies from multimodal-art-projection/YuE, commit
++  1647252d68b70cbead046ffd3f7caf036dde47ee, under the MIT license retained
++  in src/yue2_instrumental/LICENSE. The ABC test fixture is adapted from
++  that skill's example-ins.abc, with one Vocal note added for transfer tests.
++
++YuE2 instrumental AR LoRA weights
++  The app bundles ar_lora_inst_v3abc.bf16.safetensors by Mothersuperior,
++  from https://huggingface.co/Mothersuperior/YuE2-instrumental-cot-full-loras
++  revision 947f2f4b28978b2b6c3e316e6a87925c76bf3c4b.
++  These weights derive from m-a-p/YuE2-3B and are licensed CC BY-NC 4.0:
++  https://creativecommons.org/licenses/by-nc/4.0/
++  SHA-256: e408fd3148b75b1165f7ddbf63db575d83bb6402a0b5f876fcb767dbcb2c5414
++  The downloaded bf16 file is unmodified; in-memory AR projections add its
++  rank-64 deltas at scale 1.0. This community adapter is separate from the
++  official YuE2 Music Skill; no NAR/tokenizer/decoder adapter is bundled.
+diff --git a/src/cli.zig b/src/cli.zig
+index 0bcb852..0df4133 100644
+--- a/src/cli.zig
++++ b/src/cli.zig
+@@ -170,6 +170,10 @@ pub fn resolveShortName(name: []const u8) ?Resolved {
+ /// `~/.mlx-serve/models/<org>/<repo>` — the single models root shared with
+ /// the app's DownloadManager.
+ pub fn modelDestPath(allocator: std.mem.Allocator, home: []const u8, repo: []const u8) ![]u8 {
++    if (std.c.getenv("MLX_SERVE_MODELS_DIR")) |root| {
++        const path = std.mem.span(root);
++        if (std.fs.path.isAbsolute(path)) return std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, repo });
++    }
+     return std.fmt.allocPrint(allocator, "{s}/.mlx-serve/models/{s}", .{ home, repo });
+ }
+ 
+diff --git a/src/gen.zig b/src/gen.zig
+index 596eb88..684a86c 100644
+--- a/src/gen.zig
++++ b/src/gen.zig
+@@ -111,11 +111,11 @@ pub const Modality = enum {
+ /// "unsupported model_type" while the engine that serves it was ready and
+ /// waiting. The test at the bottom of this file pins them together.
+ pub const media_model_types = [_][]const u8{
+-    "flux2",     "krea",       "mage_flow",      "mageflow",
+-    "qwen3_tts", "acestep",    "kokoro",         "AudioVideo",
+-    "hunyuan3d", "minimax_h3", "minimax_music3", "qwen_image",
+-    "laya",      "kev",        "clef",           "d1",
+-    "stable_audio3", "yue2",      "nemotron_diarization",
++    "flux2",         "krea",       "mage_flow",            "mageflow",
++    "qwen3_tts",     "acestep",    "kokoro",               "AudioVideo",
++    "hunyuan3d",     "minimax_h3", "minimax_music3",       "qwen_image",
++    "laya",          "kev",        "clef",                 "d1",
++    "stable_audio3", "yue2",       "nemotron_diarization",
+ };
+ 
+ pub fn modalityFromType(model_type: []const u8) ?Modality {
+@@ -3349,7 +3349,8 @@ fn handleMusic3(allocator: std.mem.Allocator, conn: *Conn, body: []const u8, m3:
+ }
+ 
+ /// `POST /v1/audio/music-generations` on YuE2: `{"model", "prompt" (style tags, REQUIRED),
+-/// "lyrics" (REQUIRED; `[Verse]`-style section tags on their own lines), "cot" ("full" default |
++/// "lyrics" (required unless instrumental; `[Verse]` section tags), "instrumental"
++/// (default false; official Vocal-to-Ins score transfer), "cot" ("full" default |
+ /// "melody" | "off": whether the model plans an ABC score first), "abc" (your own or edited
+ /// score, replaces the planning; needs cot melody|full), "seed", "duration_seconds" (an UPPER
+ /// bound, default 360 — the model ends the song itself), "steps" (flow-matching midpoint steps,
+@@ -3357,7 +3358,7 @@ fn handleMusic3(allocator: std.mem.Allocator, conn: *Conn, body: []const u8, m3:
+ /// mirrors the other music backends; the streaming `complete` event also carries the score as
+ /// `abc`. ACE-Step's musical-metadata, reference-audio and cover fields are named 400s.
+ fn handleYue2(allocator: std.mem.Allocator, conn: *Conn, body: []const u8, engine: *yue2.Engine) !void {
+-    for ([_][]const u8{ "bpm", "keyscale", "timesignature", "vocal_language", "ref_audio", "src_audio", "task", "instrumental" }) |field| {
++    for ([_][]const u8{ "bpm", "keyscale", "timesignature", "vocal_language", "ref_audio", "src_audio", "task" }) |field| {
+         if (std.mem.indexOf(u8, body, field) == null) continue;
+         const present = extractJsonString(body, field) != null or extractJsonInt(body, field) != null or sse.bodyWantsTrue(body, field);
+         if (present) {
+@@ -3370,12 +3371,14 @@ fn handleYue2(allocator: std.mem.Allocator, conn: *Conn, body: []const u8, engin
+     const prompt = try jsonUnescape(allocator, raw_prompt);
+     defer allocator.free(prompt);
+     if (prompt.len == 0) return sendError(conn, 400, "empty 'prompt'");
+-    const raw_lyrics = extractJsonString(body, "lyrics") orelse return sendError(conn, 400, "missing 'lyrics' (YuE2 is lyric-conditioned; structure tags like [Verse] go on their own lines)");
++    const instrumental = sse.bodyWantsTrue(body, "instrumental");
++    const raw_lyrics = extractJsonString(body, "lyrics") orelse if (instrumental) "" else return sendError(conn, 400, "missing 'lyrics'");
+     const lyrics = try jsonUnescape(allocator, raw_lyrics);
+     defer allocator.free(lyrics);
+-    if (std.mem.trim(u8, lyrics, " \t\r\n").len == 0) return sendError(conn, 400, "empty 'lyrics'");
++    if (!instrumental and std.mem.trim(u8, lyrics, " \t\r\n").len == 0) return sendError(conn, 400, "empty 'lyrics'");
+ 
+     const cot = if (extractJsonString(body, "cot")) |c| (yue2.Cot.parse(c) orelse return sendError(conn, 400, "'cot' must be one of full, melody, off")) else yue2.Cot.full;
++    if (instrumental and cot != .full) return sendError(conn, 400, "instrumental LoRA needs cot full");
+     var abc: ?[]u8 = null;
+     defer if (abc) |t| allocator.free(t);
+     if (extractJsonString(body, "abc")) |raw| {
+@@ -3395,7 +3398,9 @@ fn handleYue2(allocator: std.mem.Allocator, conn: *Conn, body: []const u8, engin
+ 
+     const req = yue2.Request{
+         .style = prompt,
+-        .lyrics = lyrics,
++        // Explicitly discard lyric words; a style prompt alone is not the algorithm.
++        .lyrics = if (instrumental) "[instrumental]" else lyrics,
++        .instrumental = instrumental,
+         .cot = cot,
+         .abc = abc,
+         .seed = extractJsonInt(body, "seed") orelse 831001,
+@@ -3418,13 +3423,23 @@ fn handleYue2(allocator: std.mem.Allocator, conn: *Conn, body: []const u8, engin
+             return;
+         }
+         log.err("[yue2] generation failed: {}\n", .{err});
++        const message: []const u8 = switch (err) {
++            error.InstrumentalLoraMissing => "Instrumental Only requires the bundled YuE2 instrumental AR LoRA; use the updated app or set YUE2_INSTRUMENTAL_LORA",
++            error.InstrumentalPythonUnavailable => "Instrumental Only requires local Python 3.9+; set YUE2_INSTRUMENTAL_PYTHON to its absolute path",
++            error.InstrumentalScoreInvalid => "Instrumental score validation failed; check the native Vocal/Ins ABC format and local Python 3.9+",
++            error.InstrumentalScoreTooLarge => "Instrumental score exceeds the supported size",
++            error.InstrumentalPlanTruncated => "Instrumental score planning was truncated; retry with a fresh seed or supply a complete ABC score",
++            else => "music generation failed",
++        };
+         if (want_stream) {
+-            sse.sendError(conn, "music generation failed");
++            sse.sendError(conn, message);
+             return;
+         }
+-        return sendError(conn, jobFailureStatus(err), "music generation failed");
++        return sendError(conn, jobFailureStatus(err), message);
+     };
+     defer allocator.free(song.wav);
++    defer if (song.original_abc) |t| allocator.free(t);
++    defer if (song.transfer) |t| allocator.free(t);
+     defer if (song.abc) |t| allocator.free(t);
+     log.info("[yue2] -> {d} WAV bytes\n", .{song.wav.len});
+     var extra: std.ArrayList(u8) = .empty;
+@@ -3433,6 +3448,14 @@ fn handleYue2(allocator: std.mem.Allocator, conn: *Conn, body: []const u8, engin
+         try extra.appendSlice(allocator, ",\"abc\":");
+         try chat_mod.appendJsonString(allocator, &extra, score);
+     }
++    if (song.original_abc) |score| {
++        try extra.appendSlice(allocator, ",\"original_abc\":");
++        try chat_mod.appendJsonString(allocator, &extra, score);
++    }
++    if (song.transfer) |report| {
++        try extra.appendSlice(allocator, ",\"instrumental_transfer\":");
++        try extra.appendSlice(allocator, report);
++    }
+     return sendWavWith(allocator, conn, song.wav, want_stream, extra.items);
+ }
+ 
+@@ -6019,11 +6042,11 @@ test "stable_audio3 is a sound backend on its own route, with named bounds" {
+     try testing.expectEqual(SoundParams{ .seconds = 15, .steps = 8 }, parseSoundParams(a, "{\"duration_seconds\":1.5e1,\"steps\":8.0}").ok);
+     // Every field the endpoint cannot honor is a 400 naming it, never a silent default.
+     const bad = [_][2][]const u8{
+-        .{ "{\"duration_seconds\":0}", "duration_seconds" },   .{ "{\"duration_seconds\":121}", "duration_seconds" },
++        .{ "{\"duration_seconds\":0}", "duration_seconds" },      .{ "{\"duration_seconds\":121}", "duration_seconds" },
+         .{ "{\"duration_seconds\":\"10\"}", "duration_seconds" }, .{ "{\"steps\":0}", "steps" },
+-        .{ "{\"steps\":51}", "steps" },                     .{ "{\"steps\":-5}", "steps" },
+-        .{ "{\"steps\":4.9}", "steps" },                    .{ "{\"seed\":-1}", "seed" },
+-        .{ "{\"seed\":\"x\"}", "seed" },                    .{ "not json", "JSON" },
++        .{ "{\"steps\":51}", "steps" },                           .{ "{\"steps\":-5}", "steps" },
++        .{ "{\"steps\":4.9}", "steps" },                          .{ "{\"seed\":-1}", "seed" },
++        .{ "{\"seed\":\"x\"}", "seed" },                          .{ "not json", "JSON" },
+     };
+     for (bad) |c| {
+         const msg = parseSoundParams(a, c[0]).bad;
+diff --git a/src/tests.zig b/src/tests.zig
+index 7d183ea..54c7614 100644
+--- a/src/tests.zig
++++ b/src/tests.zig
+@@ -163,6 +163,8 @@ test {
+     _ = @import("music3.zig");
+     _ = @import("stable_audio.zig");
+     _ = @import("yue2.zig");
++    _ = @import("yue2_instrumental.zig");
++    _ = @import("yue2_lora.zig");
+     _ = @import("uvwrap.zig");
+     _ = @import("mesh_simplify.zig");
+     _ = @import("hunyuan3d_paint.zig");
+diff --git a/src/yue2.zig b/src/yue2.zig
+index 36b0a29..7d56cc5 100644
+--- a/src/yue2.zig
++++ b/src/yue2.zig
+@@ -24,9 +24,11 @@ const wav_mod = @import("wav.zig");
+ const sse = @import("gen_sse.zig");
+ const scope_mod = @import("mlx_scope.zig");
+ const Scope = scope_mod.Scope;
+-const Linear = scope_mod.Linear;
++const Linear = @import("yue2_lora.zig").Linear;
+ const getW = scope_mod.getW;
+-const linear = scope_mod.linear;
++fn linear(w: *const model_mod.Weights, comptime fmt: []const u8, args: anytype, in_dim: u32) !Linear {
++    return .{ .base = try scope_mod.linear(w, fmt, args, in_dim) };
++}
+ const evalAll = scope_mod.evalAll;
+ 
+ const S = mlx.mlx_stream;
+@@ -57,6 +59,11 @@ const LATENT_DIM: c_int = 64;
+ const DECODE_CORE_FRAMES: usize = 256;
+ const ABC_MAX_TOKENS: u32 = 4096;
+ 
++/// Instrumental LoRA's 3–5 minute plans exceed the base pack's 4096 tokens.
++pub fn abcBudget(instrumental: bool, configured: u32) u32 {
++    return if (instrumental) @max(configured, 8192) else configured;
++}
++
+ pub const Cot = enum {
+     off,
+     melody,
+@@ -454,6 +461,7 @@ pub const Request = struct {
+     style: []const u8,
+     lyrics: []const u8,
+     cot: Cot = .full,
++    instrumental: bool = false,
+     /// An external ABC score replaces the planning phase (cot melody|full).
+     abc: ?[]const u8 = null,
+     seed: u64 = 831001,
+@@ -467,16 +475,21 @@ pub const Song = struct {
+     wav: []u8,
+     /// The score the song was rendered from (owned), null for cot=off.
+     abc: ?[]u8,
++    original_abc: ?[]u8 = null,
++    transfer: ?[]u8 = null,
+ };
+ 
+ pub const Engine = struct {
+     allocator: std.mem.Allocator,
++    io: std.Io,
+     s: S,
+     cfg: Cfg,
+     gen: GenFile,
+     vae_parsed: std.json.Parsed(VaeFile),
+     w: Weights,
+     vw: Weights,
++    instrumental_weights: ?Weights = null,
++    instrumental_active: bool = false,
+     tok: tok_mod.Tokenizer,
+     layers: []Layer,
+     embed: A,
+@@ -492,6 +505,7 @@ pub const Engine = struct {
+         const self = try allocator.create(Engine);
+         errdefer allocator.destroy(self);
+         self.allocator = allocator;
++        self.io = io;
+         self.s = mlx.mlx_default_gpu_stream_new();
+ 
+         const cfg_bytes = try readFile(io, allocator, model_dir, "config.json");
+@@ -530,7 +544,10 @@ pub const Engine = struct {
+ 
+         self.layers = try allocator.alloc(Layer, self.cfg.layers);
+         errdefer allocator.free(self.layers);
++        self.instrumental_weights = null;
++        self.instrumental_active = false;
+         try self.resolve();
++        try self.loadInstrumentalLora();
+         log.info("[yue2] engine ready ({d} + {d} tensors, {d} layers x2 paths, vae {d} stages)\n", .{ self.w.count(), self.vw.count(), self.cfg.layers, vd.strides.len });
+         return self;
+     }
+@@ -538,12 +555,44 @@ pub const Engine = struct {
+     pub fn deinit(self: *Engine) void {
+         self.allocator.free(self.layers);
+         self.tok.deinit();
++        if (self.instrumental_weights) |*w| w.deinit();
+         self.w.deinit();
+         self.vw.deinit();
+         self.vae_parsed.deinit();
+         self.allocator.destroy(self);
+     }
+ 
++    fn loadInstrumentalLora(self: *Engine) !void {
++        const raw = std.c.getenv("YUE2_INSTRUMENTAL_LORA") orelse return;
++        const path = std.mem.span(raw);
++        var adapter = try model_mod.loadWeightsFile(self.allocator, std.fs.path.dirname(path) orelse ".", std.fs.path.basename(path));
++        errdefer adapter.deinit();
++        // Require the complete native AR adapter, never partially apply a fused
++        // ComfyUI file or a NAR adapter with similar-looking projection names.
++        if (adapter.count() != self.layers.len * 14) return error.InstrumentalLoraIncomplete;
++        var iter = adapter.map.valueIterator();
++        while (iter.next()) |value| {
++            var fp32 = mlx.mlx_array_new();
++            mlx.check(mlx.mlx_astype(&fp32, value.*, .float32, self.s)) catch |err| {
++                _ = mlx.mlx_array_free(fp32);
++                return err;
++            };
++            _ = mlx.mlx_array_free(value.*);
++            value.* = fp32;
++        }
++        try evalAll(&adapter);
++        for (self.layers, 0..) |*layer, index| {
++            inline for (.{ .{ "q", "self_attn.q_proj" }, .{ "k", "self_attn.k_proj" }, .{ "v", "self_attn.v_proj" }, .{ "o", "self_attn.o_proj" }, .{ "gate", "mlp.gate_proj" }, .{ "up", "mlp.up_proj" }, .{ "down", "mlp.down_proj" } }) |entry| {
++                const down = try getW(&adapter, "layers.{d}." ++ entry[1] ++ ".lora_A", .{index});
++                const up = try getW(&adapter, "layers.{d}." ++ entry[1] ++ ".lora_B", .{index});
++                if (mlx.getShape(down)[0] != 64) return error.InstrumentalLoraShapeMismatch;
++                try @field(layer.ar, entry[0]).attach(down, up, &self.instrumental_active);
++            }
++        }
++        self.instrumental_weights = adapter;
++        log.info("[yue2] instrumental AR LoRA ready: {d} tensors, scale 1.0, base weights unchanged\n", .{adapter.count()});
++    }
++
+     fn resolve(self: *Engine) !void {
+         const w = &self.w;
+         const c = self.cfg;
+@@ -576,7 +625,7 @@ pub const Engine = struct {
+         defer a.free(text);
+         const ids = try self.textIds(a, text);
+         defer a.free(ids);
+-        const abc_room: usize = if (req.cot == .off) 0 else if (req.abc) |s| s.len else ABC_MAX_TOKENS;
++        const abc_room: usize = if (req.cot == .off) 0 else if (req.abc) |s| s.len else abcBudget(req.instrumental, self.gen.abc.max_tokens);
+         return ids.len + 4 + abc_room + req.max_frames <= CONTEXT;
+     }
+ 
+@@ -950,10 +999,14 @@ pub const Engine = struct {
+     // ── song ─────────────────────────────────────────────────────────────
+ 
+     pub fn generate(self: *Engine, allocator: std.mem.Allocator, req: Request, progress: ?sse.Progress) !Song {
++        if (req.instrumental and req.cot != .full) return error.InstrumentalNeedsFullScore;
++        if (req.instrumental and self.instrumental_weights == null) return error.InstrumentalLoraMissing;
++        self.instrumental_active = req.instrumental;
++        defer self.instrumental_active = false;
+         const steps = req.steps orelse self.gen.ode_steps;
+-        const text = try promptText(allocator, req.cot, req.style, req.lyrics);
++        const text = try promptText(allocator, req.cot, req.style, if (req.instrumental) "[instrumental]" else req.lyrics);
+         defer allocator.free(text);
+-        const text_ids = try self.textIds(allocator, text);
++        var text_ids = try self.textIds(allocator, text);
+         defer allocator.free(text_ids);
+         // The reference's cot=off arithmetic keeps the top 3 through top-p, every other path the top 1.
+         const floor: usize = if (req.cot == .off) 3 else 1;
+@@ -969,15 +1022,45 @@ pub const Engine = struct {
+             } else {
+                 const open = try assemblePrefix(allocator, text_ids, req.cot, null);
+                 defer allocator.free(open);
+-                if (open.len + ABC_MAX_TOKENS > CONTEXT) return error.PromptTooLong;
++                var abc_sampling = self.gen.abc;
++                abc_sampling.max_tokens = abcBudget(req.instrumental, abc_sampling.max_tokens);
++                if (open.len + abc_sampling.max_tokens > CONTEXT) return error.PromptTooLong;
+                 log.info("[yue2] planning the ABC score ({s}, prefix {d})\n", .{ @tagName(req.cot), open.len });
+-                const g = try self.generateTokens(allocator, open, null, 1.0, self.gen.abc, .abc, req.seed, floor, progress);
++                const g = try self.generateTokens(allocator, open, null, 1.0, abc_sampling, .abc, req.seed, floor, progress);
+                 abc_ids = g.ids;
+                 abc_text = try self.tok.decode(allocator, abc_ids, false);
+-                if (g.truncated) log.info("[yue2] ABC hit max_tokens\n", .{});
++                if (g.truncated) {
++                    if (req.instrumental) return error.InstrumentalPlanTruncated;
++                    log.info("[yue2] ABC hit max_tokens\n", .{});
++                }
+             }
+         }
+ 
++        var original_abc: ?[]u8 = null;
++        errdefer if (original_abc) |t| allocator.free(t);
++        var transfer: ?[]u8 = null;
++        errdefer if (transfer) |t| allocator.free(t);
++        if (req.instrumental) {
++            if (progress) |p| p.emit("instrumental", 0, 0);
++            const converted = try @import("yue2_instrumental.zig").convert(allocator, self.io, abc_text orelse return error.InstrumentalNeedsScore);
++            defer allocator.free(converted.lyrics);
++            original_abc = abc_text;
++            abc_text = converted.abc;
++            transfer = converted.transfer;
++            // Re-encode the edited score; never continue the original plan tokens.
++            const revised_ids = try self.tok.encode(allocator, converted.abc);
++            allocator.free(abc_ids);
++            abc_ids = revised_ids;
++            // Official prepare step: score-derived structure tags, no lyric words,
++            // instrumental style guards, and a fresh semantic/NAR conditioning prefix.
++            const render_style = try @import("yue2_instrumental.zig").renderStyle(allocator, req.style);
++            defer allocator.free(render_style);
++            const render_text = try promptText(allocator, req.cot, render_style, "[instrumental]");
++            defer allocator.free(render_text);
++            const render_ids = try self.textIds(allocator, render_text);
++            allocator.free(text_ids);
++            text_ids = render_ids;
++        }
+         const prefix = try assemblePrefix(allocator, text_ids, req.cot, abc_ids);
+         defer allocator.free(prefix);
+         var samp = self.gen.semantic;
+@@ -1011,7 +1094,7 @@ pub const Engine = struct {
+         const pcm = try self.decodeLatents(allocator, latents, self.decodeCore(), progress);
+         defer allocator.free(pcm);
+         const wav = try wav_mod.encodePcm16(allocator, pcm, SAMPLE_RATE, 2);
+-        return .{ .wav = wav, .abc = abc_text };
++        return .{ .wav = wav, .abc = abc_text, .original_abc = original_abc, .transfer = transfer };
+     }
+ };
+ 
+@@ -1498,3 +1581,9 @@ test "yue2 VAE: the decode tile size never changes the audio" {
+     std.debug.print("[yue2-test] vae tile size: max |diff| {e} of peak {d:.3}\n", .{ worst, peak });
+     try testing.expect(worst <= peak * 1e-4);
+ }
++
++test "yue2 instrumental score budget supports the trained long-form adapter" {
++    try std.testing.expectEqual(@as(u32, 8192), abcBudget(true, 4096));
++    try std.testing.expectEqual(@as(u32, 9000), abcBudget(true, 9000));
++    try std.testing.expectEqual(@as(u32, 4096), abcBudget(false, 4096));
++}
+diff --git a/src/yue2_instrumental.zig b/src/yue2_instrumental.zig
+new file mode 100644
+index 0000000..f63c97a
+--- /dev/null
++++ b/src/yue2_instrumental.zig
+@@ -0,0 +1,91 @@
++//! Official YuE2 Music Skill's event-level transfer, pinned and unmodified.
++//! Only this opt-in CPU step needs local Python 3.9+ (stdlib); inference stays MLX.
++const std = @import("std");
++const modules = .{
++    .abc_tools = @embedFile("yue2_instrumental/abc_tools.py"),
++    .common = @embedFile("yue2_instrumental/common.py"),
++    .compile_score = @embedFile("yue2_instrumental/compile_score.py"),
++    .instrumentalize = @embedFile("yue2_instrumental/instrumentalize.py"),
++};
++pub const Result = struct { abc: []u8, transfer: []u8, lyrics: []u8 };
++
++pub fn convert(a: std.mem.Allocator, io: std.Io, score: []const u8) !Result {
++    // Bounds both process arguments and CPU work; never silently fall back to singing.
++    if (score.len == 0 or score.len > 96 * 1024) return error.InstrumentalScoreTooLarge;
++    const sources = try std.json.Stringify.valueAlloc(a, modules, .{});
++    defer a.free(sources);
++    const python = if (std.c.getenv("YUE2_INSTRUMENTAL_PYTHON")) |p| std.mem.span(p) else "/usr/bin/python3";
++    const result = std.process.run(a, io, .{
++        .argv = &.{ python, "-I", "-c", @embedFile("yue2_instrumental/bridge.py"), sources, score },
++        .stdout_limit = .limited(1024 * 1024),
++        .stderr_limit = .limited(16 * 1024),
++    }) catch |err| switch (err) {
++        error.OutOfMemory => return error.OutOfMemory,
++        else => return error.InstrumentalPythonUnavailable,
++    };
++    defer a.free(result.stdout);
++    defer a.free(result.stderr);
++    switch (result.term) {
++        .exited => |code| if (code != 0) return error.InstrumentalScoreInvalid,
++        else => return error.InstrumentalScoreInvalid,
++    }
++    const parsed = try std.json.parseFromSlice(struct { abc: []const u8, transfer: std.json.Value, lyrics: []const u8 }, a, result.stdout, .{});
++    defer parsed.deinit();
++    const abc = try a.dupe(u8, parsed.value.abc);
++    errdefer a.free(abc);
++    const lyrics = try a.dupe(u8, parsed.value.lyrics);
++    errdefer a.free(lyrics);
++    return .{ .abc = abc, .lyrics = lyrics, .transfer = try std.json.Stringify.valueAlloc(a, parsed.value.transfer, .{}) };
++}
++
++fn containsIgnoreCase(text: []const u8, needle: []const u8) bool {
++    if (text.len < needle.len) return false;
++    for (0..text.len - needle.len + 1) |i| {
++        if (std.ascii.eqlIgnoreCase(text[i..][0..needle.len], needle)) return true;
++    }
++    return false;
++}
++
++/// The official prepare step adds these style guards in addition to moving notes.
++pub fn renderStyle(a: std.mem.Allocator, style: []const u8) ![]u8 {
++    var result: std.ArrayList(u8) = .empty;
++    errdefer result.deinit(a);
++    if (!containsIgnoreCase(style, "instrumental")) try result.appendSlice(a, "Instrumental, ");
++    try result.appendSlice(a, std.mem.trimEnd(u8, style, " .,"));
++    for ([_][]const u8{ "no vocals", "no singing", "no choir", "no spoken words" }) |condition| {
++        if (!containsIgnoreCase(style, condition)) {
++            try result.appendSlice(a, ", ");
++            try result.appendSlice(a, condition);
++        }
++    }
++    try result.append(a, '.');
++    return result.toOwnedSlice(a);
++}
++
++test "instrumental render style preserves genre and adds official guards" {
++    const a = std.testing.allocator;
++    const style = try renderStyle(a, "Lo-fi, Rhodes, mellow.");
++    defer a.free(style);
++    try std.testing.expectEqualStrings("Instrumental, Lo-fi, Rhodes, mellow, no vocals, no singing, no choir, no spoken words.", style);
++}
++
++test "instrumental embedded bridge moves the official example" {
++    const a = std.testing.allocator;
++    var threaded = std.Io.Threaded.init(a, .{});
++    defer threaded.deinit();
++    const result = try convert(a, threaded.io(), @embedFile("yue2_instrumental/example-original.abc"));
++    defer a.free(result.abc);
++    defer a.free(result.transfer);
++    defer a.free(result.lyrics);
++    try std.testing.expect(std.mem.indexOf(u8, result.transfer, "\"vocal_notes_after\":0") != null);
++    try std.testing.expect(std.mem.indexOf(u8, result.transfer, "\"vocal_pitch_onset_duration_preserved\":true") != null);
++}
++
++test "instrumental bridge rejects malformed and unbounded scores" {
++    const a = std.testing.allocator;
++    var threaded = std.Io.Threaded.init(a, .{});
++    defer threaded.deinit();
++    const io = threaded.io();
++    try std.testing.expectError(error.InstrumentalScoreInvalid, convert(a, io, "X:1\nK:C\nCDEF|"));
++    try std.testing.expectError(error.InstrumentalScoreTooLarge, convert(a, io, ""));
++}
+diff --git a/src/yue2_instrumental/LICENSE b/src/yue2_instrumental/LICENSE
+new file mode 100644
+index 0000000..3db9f3d
+--- /dev/null
++++ b/src/yue2_instrumental/LICENSE
+@@ -0,0 +1,21 @@
++MIT License
++
++Copyright (c) 2026 yue2-music contributors
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
+diff --git a/src/yue2_instrumental/PROVENANCE.txt b/src/yue2_instrumental/PROVENANCE.txt
+new file mode 100644
+index 0000000..2b51de2
+--- /dev/null
++++ b/src/yue2_instrumental/PROVENANCE.txt
+@@ -0,0 +1,14 @@
++Upstream: https://github.com/multimodal-art-projection/YuE
++Revision: 1647252d68b70cbead046ffd3f7caf036dde47ee
++Directory: skills/yue2-music/instrumental/scripts
++Unmodified files: abc_tools.py, common.py, compile_score.py, instrumentalize.py
++License: upstream instrumental/LICENSE (MIT, copied here as LICENSE)
++bridge.py is an MLX-Serve adapter; it uses only Python's standard library.
++example-original.abc is a test fixture adapted from upstream assets/example-ins.abc:
++the first G-chord Vocal rest is replaced by B16z16, deliberately overlapping Ins.
++
++The four modules are embedded in the Zig binary, passed as JSON arguments to
++isolated local Python, registered by name and evaluated before the adapter runs.
++No Python packages, Torch, CUDA, HTTP calls, model downloads, or subprocess
++inference are involved in this score-only step. Python 3.9+ is required only
++when Instrumental Only is enabled. Inference and VAE decoding remain native MLX.
+diff --git a/src/yue2_instrumental/abc_tools.py b/src/yue2_instrumental/abc_tools.py
+new file mode 100644
+index 0000000..88b66e5
+--- /dev/null
++++ b/src/yue2_instrumental/abc_tools.py
+@@ -0,0 +1,337 @@
++#!/usr/bin/env python3
++"""Inspect the limited two-voice ABC dialect used by YuE2 and SheetSage2.
++
++Original, standard-library-only implementation. This is deliberately not a
++general ABC parser or a replacement for SheetSage2's native score serializer.
++All times are exact fractions of a quarter note. See references/abc-editing.md.
++"""
++
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import re
++import sys
++from dataclasses import dataclass, field
++from fractions import Fraction
++from pathlib import Path
++
++
++VOICES = ("Vocal", "Ins")
++DURATIONS = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48}
++QUALITIES = ("", "m", "dim", "aug", "7", "maj7", "m7", "dim7", "m7b5",
++             "sus4", "sus2", "6", "m6", "7sus4", "m(maj7)")
++PITCH_NAME = r"[A-G](?:bb|##|b|#)?"
++CHORD = re.compile(PITCH_NAME + "(?:" + "|".join(re.escape(q) for q in QUALITIES)
++                   + ")(?:/" + PITCH_NAME + ")?")
++TOKEN = re.compile(
++    r'"(?P<chord>[^"\n]*)"|\[K:(?P<key>[^\]\n]+)\]|'
++    r"(?P<acc>\^\^|__|\^|_|=)?(?P<note>[A-Ga-gz])"
++    r"(?P<oct>[,']*)(?P<duration>[0-9]*)(?P<tie>-?)"
++)
++NATURAL = dict(zip("CDEFGAB", (0, 2, 4, 5, 7, 9, 11)))
++KEYS = {
++    **dict(zip(("Cb", "Gb", "Db", "Ab", "Eb", "Bb", "F", "C", "G", "D", "A", "E", "B", "F#", "C#"), range(-7, 8))),
++    **dict(zip(("Abm", "Ebm", "Bbm", "Fm", "Cm", "Gm", "Dm", "Am", "Em", "Bm", "F#m", "C#m", "G#m", "D#m", "A#m"), range(-7, 8))),
++}
++
++
++class AbcError(ValueError):
++    """Unsupported notation or a failed structural invariant."""
++
++
++def fail(condition: bool, message: str) -> None:
++    if condition:
++        raise AbcError(message)
++
++
++def key_accidentals(key: str) -> dict[str, int]:
++    fail(key not in KEYS, f"Unsupported key {key!r}; use a standard major or minor K: field")
++    count = KEYS[key]
++    result = {letter: 0 for letter in NATURAL}
++    for letter in ("FCGDAEB" if count > 0 else "BEADGCF")[:abs(count)]:
++        result[letter] = 1 if count > 0 else -1
++    return result
++
++
++def meter_value(text: str) -> tuple[int, int]:
++    match = re.fullmatch(r"([1-9][0-9]*)/([1-9][0-9]*)", text)
++    fail(match is None, f"Unsupported meter {text!r}; write an explicit fraction")
++    n, d = map(int, match.groups())
++    fail(d > 1024 or d & (d - 1) != 0, f"Unsupported meter denominator {d}")
++    return n, d
++
++
++@dataclass
++class Voice:
++    meter: tuple[int, int]
++    key: str
++    time: Fraction = Fraction(0)
++    notes: list = field(default_factory=list)
++    bars: list = field(default_factory=list)
++    chords: list = field(default_factory=list)
++    keys: list = field(default_factory=list)
++    pending: tuple | None = None
++
++
++@dataclass
++class Score:
++    text: str
++    unit: Fraction
++    bpm: int
++    voices: dict[str, Voice]
++    music_lines: dict[int, str]
++
++
++def parse_bar(body: str, voice: Voice, unit: Fraction, context: str) -> None:
++    n, d = voice.meter
++    length = Fraction(4 * n, d)
++    start = voice.time
++    offset = Fraction(0)
++    local = {}  # Native exporters propagate accidentals by letter, across octaves.
++    if body == "Z":
++        fail(voice.pending is not None, f"{context}: tie enters a full-measure rest")
++        offset = length
++    else:
++        cursor = 0
++        while cursor < len(body):
++            if body[cursor].isspace():
++                cursor += 1
++                continue
++            match = TOKEN.match(body, cursor)
++            fail(match is None, f"{context}: unsupported token at {body[cursor:cursor + 24]!r}")
++            cursor = match.end()
++            chord, key = match.group("chord", "key")
++            fail(offset >= length, f"{context}: event after the measure end")
++            if chord is not None:
++                fail(CHORD.fullmatch(chord) is None, f"{context}: unsupported chord {chord!r}")
++                voice.chords.append((start + offset, chord))
++                continue
++            if key is not None:
++                key_accidentals(key)
++                voice.key = key
++                voice.keys.append((start + offset, key))
++                local = {}
++                continue
++            note, acc, octave, tie = match.group("note", "acc", "oct", "tie")
++            units = int(match.group("duration") or "1")
++            fail(units not in DURATIONS, f"{context}: unsupported duration {units}; split it into tied supported lengths")
++            duration = units * unit * 4
++            fail(offset + duration > length, f"{context}: note/rest exceeds meter duration")
++            fail("," in octave and "'" in octave, f"{context}: mixed octave marks")
++            if note == "z":
++                fail(bool(acc or octave or tie), f"{context}: a rest cannot have accidentals, octave marks or ties")
++                fail(voice.pending is not None, f"{context}: tie enters a rest")
++            else:
++                letter = note.upper()
++                written = 60 + NATURAL[letter] + (12 if note.islower() else 0)
++                written += 12 * (octave.count("'") - octave.count(","))
++                alteration = local.get(letter, key_accidentals(voice.key)[letter])
++                if acc:
++                    alteration = {"=": 0, "_": -1, "__": -2, "^": 1, "^^": 2}[acc]
++                    local[letter] = alteration
++                pitch = written + alteration
++                if voice.pending is not None:
++                    old_pitch, old_written = voice.pending
++                    # An unmarked continuation retains its tied accidental across
++                    # a barline. It does not alter later untied notes in that bar.
++                    if not acc and written == old_written:
++                        pitch = old_pitch
++                    fail(pitch != old_pitch, f"{context}: tie changes pitch from {old_pitch} to {pitch}")
++                    voice.notes[-1][2] += duration
++                else:
++                    fail(not 0 <= pitch <= 127, f"{context}: pitch {pitch} is outside MIDI range")
++                    voice.notes.append([start + offset, pitch, duration])
++                voice.pending = (pitch, written) if tie else None
++            offset += duration
++    fail(offset != length, f"{context}: duration {offset} quarter notes != meter duration {length}")
++    voice.bars.append((start, length, voice.meter))
++    voice.time += length
++
++
++def parse(text: str) -> Score:
++    """Fail closed for unsupported tokens; resolve sounding notes, not token counts."""
++    lines = text.splitlines()
++    fail(len(lines) < 12, "Incomplete native two-voice ABC")
++    fail(lines[0:2] != ["X:1", "T:"], "Expected native X:1 and blank T: header")
++    fail(not lines[2].startswith("M:"), "Missing header M:")
++    meter = meter_value(lines[2][2:])
++    unit_match = re.fullmatch(r"L:1/([1-9][0-9]*)", lines[3])
++    fail(unit_match is None, "Expected L:1/<power of two>, usually L:1/32")
++    denominator = int(unit_match.group(1))
++    fail(denominator > 1024 or denominator & (denominator - 1) != 0, "Unsupported L: denominator")
++    unit = Fraction(1, denominator)
++    tempo_match = re.fullmatch(r"Q:1/4=([1-9][0-9]*)", lines[4])
++    fail(tempo_match is None, "Expected integer quarter-note tempo Q:1/4=<BPM>")
++    expected_voices = ['V: Vocal clef=treble name="Vocal Melody" snm="Vocal"',
++                       'V: Ins clef=treble name="Ins Melody" snm="Inst."']
++    fail(lines[5:7] != expected_voices, "Preserve native Vocal and Ins voice definitions")
++    fail(not lines[7].startswith("K:"), "Missing header K:")
++    key = lines[7][2:]
++    key_accidentals(key)
++    voices = {name: Voice(meter, key, keys=[(Fraction(0), key)]) for name in VOICES}
++    music_lines = {}
++    cursor = 8
++    group = 0
++    while cursor < len(lines):
++        while cursor < len(lines) and lines[cursor].startswith("% "):
++            cursor += 1
++        fail(cursor == len(lines), "Dangling section comment without music")
++        group += 1
++        counts = []
++        for name in VOICES:
++            context = f"group {group}, {name}"
++            fail(cursor >= len(lines) or lines[cursor] != f"V: {name}", f"{context}: expected V: {name}")
++            cursor += 1
++            voice = voices[name]
++            fields = set()
++            while cursor < len(lines) and lines[cursor].startswith(("M:", "K:")):
++                field_name, value = lines[cursor].split(":", 1)
++                fail(field_name in fields, f"{context}: duplicate {field_name}: field")
++                fields.add(field_name)
++                if field_name == "M":
++                    voice.meter = meter_value(value)
++                else:
++                    key_accidentals(value)
++                    voice.key = value
++                    voice.keys.append((voice.time, value))
++                cursor += 1
++            fail(cursor >= len(lines), f"{context}: missing music line")
++            line = lines[cursor]
++            fail(not line.endswith("|"), f"{context}: music line must end with a plain barline")
++            music_lines[cursor] = name
++            cursor += 1
++            bars = []
++            for bar in line[:-1].split("|"):
++                bar = bar.strip()
++                fail(not bar, f"{context}: empty measure or unsupported double/repeat barline")
++                rest = re.fullmatch(r"Z([2-4])?", bar)
++                if rest:
++                    bars.extend(["Z"] * int(rest.group(1) or "1"))
++                else:
++                    bars.append(bar)
++            fail(not 1 <= len(bars) <= 4, f"{context}: expected 1–4 measures after expanding Z rests")
++            counts.append(len(bars))
++            for bar in bars:
++                parse_bar(bar, voice, unit, f"{context}, bar {len(voice.bars) + 1}")
++        fail(counts[0] != counts[1], f"group {group}: voices have different measure counts")
++    for name, voice in voices.items():
++        fail(voice.pending is not None, f"{name}: unresolved tie at end of score")
++    fail(voices["Ins"].chords != [], "Native chord symbols belong in Vocal, not Ins")
++    fail(voices["Vocal"].bars != voices["Ins"].bars, "Voice meter/time grids differ")
++    fail(voices["Vocal"].keys != voices["Ins"].keys, "Voice key-change timelines differ")
++    return Score(text, unit, int(tempo_match.group(1)), voices, music_lines)
++
++
++def json_value(value):
++    if isinstance(value, Fraction):
++        return str(value)
++    raise TypeError(type(value).__name__)
++
++
++def parse_abc(text: str) -> Score:
++    """Public import entry point; no model load, files, or optional dependencies."""
++    return parse(text)
++
++
++def report(score: Score) -> dict:
++    return {
++        "scope": "native-dialect structural check; not native serializer reconstruction or audio verification",
++        "sha256": hashlib.sha256(score.text.encode()).hexdigest(),
++        "bpm": score.bpm, "unit_length": str(score.unit),
++        "duration_quarters": str(score.voices["Vocal"].time),
++        "nominal_duration_seconds": float(score.voices["Vocal"].time * 60 / score.bpm),
++        "voices": {name: {"sounding_notes": len(v.notes), "measures": len(v.bars),
++                           "notes": [{"onset_quarters": str(t), "midi_pitch": p, "duration_quarters": str(d)}
++                                     for t, p, d in v.notes],
++                           "chords": v.chords, "keys": v.keys, "bars": v.bars}
++                   for name, v in score.voices.items()},
++    }
++
++
++def compare(before: Score, after: Score, names=VOICES, allow_tempo_change=False) -> dict:
++    differences = []
++    if before.bpm != after.bpm and not allow_tempo_change:
++        differences.append("quarter-note tempo differs")
++    for name in names:
++        a, b = before.voices[name], after.voices[name]
++        if a.bars != b.bars:
++            differences.append(f"{name}: bar meter/time grid differs")
++        if a.notes != b.notes:
++            common = min(len(a.notes), len(b.notes))
++            first = next((i for i in range(common) if a.notes[i] != b.notes[i]), common)
++            differences.append(f"{name}: sounding notes differ starting at note {first + 1} (pitch, onset or duration)")
++    return {"match": not differences, "compared_voices": list(names),
++            "tempo_change_allowed": allow_tempo_change, "differences": differences,
++            "scope": "exact symbolic melody and meter; no claim about generated audio or unchanged harmony"}
++
++
++def strip_chords(text: str, keep_voice="both") -> str:
++    source = parse(text)
++    lines = text.splitlines(keepends=True)
++    for index, name in source.music_lines.items():
++        def transform(match):
++            if match.group("chord") is not None:
++                return ""
++            if keep_voice != "both" and name != keep_voice and match.group("note") is not None:
++                return "z" + match.group("duration")
++            return match.group(0)
++        lines[index] = TOKEN.sub(transform, lines[index])
++    output = "".join(lines)
++    result = parse(output)
++    names = VOICES if keep_voice == "both" else (keep_voice,)
++    invariant = compare(source, result, names)
++    fail(not invariant["match"], f"Chord removal changed melody: {invariant['differences']}")
++    fail(any(v.chords for v in result.voices.values()), "Chord removal left a chord symbol")
++    if keep_voice != "both":
++        fail(any(v.notes for name, v in result.voices.items() if name != keep_voice), "Unselected voice was not silenced")
++    return output
++
++
++def main() -> int:
++    cli = argparse.ArgumentParser(description=__doc__)
++    commands = cli.add_subparsers(dest="command", required=True)
++    inspect = commands.add_parser("inspect", help="validate and export exact note/meter/chord events")
++    inspect.add_argument("score", type=Path)
++    inspect.add_argument("--output", type=Path)
++    strip = commands.add_parser("strip-chords", help="remove musical chord symbols, preserving header quotes")
++    strip.add_argument("source", type=Path)
++    strip.add_argument("output", type=Path)
++    strip.add_argument("--keep-voice", choices=("both", *VOICES), default="both",
++                       help="both preserves all melodies; selecting one replaces the other voice with rests")
++    diff = commands.add_parser("compare", help="check exact sounding-note/meter invariants after editing")
++    diff.add_argument("before", type=Path)
++    diff.add_argument("after", type=Path)
++    diff.add_argument("--voices", choices=("both", *VOICES), default="both")
++    diff.add_argument("--allow-tempo-change", action="store_true")
++    diff.add_argument("--output", type=Path)
++    args = cli.parse_args()
++    try:
++        if args.command == "inspect":
++            data = report(parse(args.score.read_text(encoding="utf-8")))
++        elif args.command == "strip-chords":
++            fail(args.source.resolve() == args.output.resolve(), "Write a new file; do not overwrite the source")
++            output = strip_chords(args.source.read_text(encoding="utf-8"), args.keep_voice)
++            with args.output.open("x", encoding="utf-8") as handle:
++                handle.write(output)
++            print(json.dumps({"output": str(args.output), "kept_voice": args.keep_voice}))
++            return 0
++        else:
++            names = VOICES if args.voices == "both" else (args.voices,)
++            data = compare(parse(args.before.read_text(encoding="utf-8")),
++                           parse(args.after.read_text(encoding="utf-8")), names, args.allow_tempo_change)
++        rendered = json.dumps(data, indent=2, ensure_ascii=False, default=json_value) + "\n"
++        if args.output:
++            fail(args.output.exists(), "Report output already exists; choose a new path")
++            args.output.write_text(rendered, encoding="utf-8")
++        else:
++            print(rendered, end="")
++        return 1 if data.get("match") is False else 0
++    except (AbcError, OSError) as error:
++        print(f"ABC check failed: {error}", file=sys.stderr)
++        return 2
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/src/yue2_instrumental/bridge.py b/src/yue2_instrumental/bridge.py
+new file mode 100644
+index 0000000..cf20af1
+--- /dev/null
++++ b/src/yue2_instrumental/bridge.py
+@@ -0,0 +1,25 @@
++"""Local stdlib-only adapter; embedded by Zig, no runtime source files needed."""
++import json
++import sys
++import types
++
++# The server supplies pinned modules, not a filesystem search path. Isolated
++# Python (-I) ignores PYTHONPATH, user site packages and the working directory.
++if len(sys.argv) == 3:
++    for name, source in json.loads(sys.argv[1]).items():
++        module = types.ModuleType(name)
++        sys.modules[name] = module
++        exec(compile(source, name + '.py', 'exec'), module.__dict__)
++else:
++    # Standalone CPU tests use the same modules from this directory.
++    sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent))
++
++from instrumentalize import convert_score
++try:
++    abc, report = convert_score(sys.argv[-1], overlap='vocal', keep_chords=True)
++    labels = [line[2:] for line in abc.splitlines() if line.startswith('% ')]
++    lyrics = '\n\n'.join('[' + x.title() + ']' for x in labels) + ('\n' if labels else '')
++    print(json.dumps({'abc': abc, 'transfer': report, 'lyrics': lyrics}))
++except (ValueError, KeyError, TypeError) as exc:
++    print('Instrumental score validation failed: ' + str(exc), file=sys.stderr)
++    sys.exit(2)
+diff --git a/src/yue2_instrumental/common.py b/src/yue2_instrumental/common.py
+new file mode 100644
+index 0000000..4b6c2d5
+--- /dev/null
++++ b/src/yue2_instrumental/common.py
+@@ -0,0 +1,34 @@
++"""Small standard-library helpers shared by the portable command-line tools."""
++
++import hashlib
++import json
++from fractions import Fraction
++from pathlib import Path
++
++
++def sha256(path):
++    digest = hashlib.sha256()
++    with Path(path).open("rb") as stream:
++        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
++            digest.update(block)
++    return digest.hexdigest()
++
++
++def read_json(path):
++    return json.loads(Path(path).read_text(encoding="utf-8"))
++
++
++def write_json(path, value):
++    def encode(item):
++        if isinstance(item, Fraction):
++            return str(item)
++        raise TypeError(f"Unsupported JSON value: {type(item).__name__}")
++
++    Path(path).write_text(json.dumps(value, ensure_ascii=False, indent=2,
++                                    allow_nan=False, default=encode) + "\n", encoding="utf-8")
++
++
++def fresh_directory(path):
++    path = Path(path)
++    path.mkdir(parents=True, exist_ok=False)
++    return path
+diff --git a/src/yue2_instrumental/compile_score.py b/src/yue2_instrumental/compile_score.py
+new file mode 100644
+index 0000000..d20e199
+--- /dev/null
++++ b/src/yue2_instrumental/compile_score.py
+@@ -0,0 +1,226 @@
++#!/usr/bin/env python3
++"""Compile explicit beat-domain events to YuE2's instrumental ABC dialect.
++
++Standard library only. This is an event compiler, not a general ABC importer.
++The agent interprets/repairs the source; this tool checks and serializes its result.
++All event times are quarter-note counts, using integers or fraction strings.
++"""
++from __future__ import annotations
++
++import argparse
++from fractions import Fraction
++import json
++from math import lcm
++from pathlib import Path
++import sys
++
++from abc_tools import DURATIONS, NATURAL, key_accidentals, meter_value, parse_abc, report
++from common import write_json
++
++SECTIONS = {'intro', 'verse', 'pre-chorus', 'chorus', 'bridge', 'interlude', 'outro', 'instrumental'}
++
++
++def fraction(value, context):
++    if isinstance(value, bool) or not isinstance(value, (int, str)):
++        raise ValueError(f'{context}: use integer or fraction string, not a float')
++    try:
++        return Fraction(value)
++    except (ValueError, ZeroDivisionError) as exc:
++        raise ValueError(f'{context}: invalid fraction {value!r}') from exc
++
++
++def lengths(value):
++    if value.denominator != 1 or value <= 0:
++        raise ValueError(f'Unrepresentable duration in ABC units: {value}')
++    left = int(value)
++    result = []
++    for part in sorted(DURATIONS, reverse=True):
++        while left >= part:
++            result.append(part)
++            left -= part
++    return result
++
++
++def spelling(pitch, key, active):
++    signature = key_accidentals(key)
++    prefer_sharp = sum(signature.values()) >= 0
++    candidates = []
++    for letter, pc in NATURAL.items():
++        for alteration in (-1, 0, 1):
++            base = pitch - alteration - 60 - pc
++            if base % 12:
++                continue
++            octave = base // 12
++            score = (alteration != signature[letter], abs(alteration),
++                     (alteration < 0) if prefer_sharp else (alteration > 0))
++            candidates.append((score, letter, alteration, octave))
++    _, letter, alteration, octave = min(candidates)
++    accidental = ''
++    if alteration != active.get(letter, signature[letter]):
++        accidental = {-1: '_', 0: '=', 1: '^'}[alteration]
++        active[letter] = alteration
++    name = letter + ',' * (-octave) if octave < 0 else (
++        letter if octave == 0 else letter.lower() + "'" * (octave - 1))
++    return accidental + name
++
++
++def compress(bars):
++    result, index = [], 0
++    while index < len(bars):
++        if bars[index] != 'Z':
++            result.append(bars[index] + '|')
++            index += 1
++            continue
++        end = index + 1
++        while end < len(bars) and bars[end] == 'Z':
++            end += 1
++        count = end - index
++        result.append('Z' + (str(count) if count > 1 else '') + '|')
++        index = end
++    return ''.join(result)
++
++
++def compile_events(data):
++    if not isinstance(data, dict) or set(data) - {'bpm', 'key', 'bars', 'notes', 'chords'}:
++        raise ValueError('Score requires bpm, key, bars, notes and optional chords; unknown fields are rejected')
++    bpm = data.get('bpm')
++    if type(bpm) is not int or bpm <= 0:
++        raise ValueError('bpm must be a positive integer quarter-note tempo')
++    key = data.get('key', 'C')
++    key_accidentals(key)
++    if not isinstance(data.get('bars'), list) or not data['bars']:
++        raise ValueError('bars must be a nonempty list')
++    bars, time, meter, section = [], Fraction(0), '4/4', None
++    unit_denominator = 32
++    for i, item in enumerate(data['bars']):
++        if not isinstance(item, dict) or set(item) - {'meter', 'key', 'section'}:
++            raise ValueError(f'bar {i + 1}: only meter, key and section are supported')
++        meter, key = item.get('meter', meter), item.get('key', key)
++        n, d = meter_value(meter)
++        key_accidentals(key)
++        unit_denominator = lcm(unit_denominator, 4 * d)
++        incoming = item.get('section', section)
++        if incoming is not None and incoming not in SECTIONS:
++            raise ValueError(f'bar {i + 1}: section must be one of {sorted(SECTIONS)}')
++        section = incoming
++        end = time + Fraction(4 * n, d)
++        bars.append(dict(start=time, end=end, meter=meter, key=key, section=section))
++        time = end
++    notes = []
++    for i, item in enumerate(data.get('notes', [])):
++        if not isinstance(item, list) or len(item) != 3:
++            raise ValueError(f'note {i + 1}: expected [onset, duration, MIDI pitch]')
++        start, duration = fraction(item[0], f'note {i + 1} onset'), fraction(item[1], f'note {i + 1} duration')
++        pitch = item[2]
++        if type(pitch) is not int or not 0 <= pitch <= 127:
++            raise ValueError(f'note {i + 1}: pitch must be one MIDI integer; reduce polyphony first')
++        if start < 0 or duration <= 0 or start + duration > time:
++            raise ValueError(f'note {i + 1}: onset/duration is outside the score')
++        notes.append((start, pitch, duration))
++        unit_denominator = lcm(unit_denominator, (start / 4).denominator, (duration / 4).denominator)
++    notes.sort()
++    if not notes:
++        raise ValueError('Instrumental score has no sounding notes')
++    for a, b in zip(notes, notes[1:]):
++        if a[0] + a[2] > b[0]:
++            raise ValueError(f'Overlapping melody notes at quarter {b[0]}; choose one lead line before compilation')
++    from abc_tools import CHORD
++    chords = []
++    for i, item in enumerate(data.get('chords', [])):
++        if not isinstance(item, list) or len(item) != 2:
++            raise ValueError(f'chord {i + 1}: expected [onset, symbol]')
++        when = fraction(item[0], f'chord {i + 1} onset')
++        symbol = item[1]
++        if when < 0 or when >= time or not isinstance(symbol, str) or not CHORD.fullmatch(symbol):
++            raise ValueError(f'chord {i + 1}: unsupported symbol or onset')
++        chords.append((when, symbol))
++        unit_denominator = lcm(unit_denominator, (when / 4).denominator)
++    chords.sort()
++    if any(a[0] == b[0] for a, b in zip(chords, chords[1:])):
++        raise ValueError('Conflicting/duplicate chord events at the same onset; choose one harmony timeline')
++    if unit_denominator > 1024 or unit_denominator & (unit_denominator - 1):
++        raise ValueError('Rhythm is outside the power-of-two training grid; explicitly quantize tuplets and record the changes')
++    unit_quarters = Fraction(4, unit_denominator)
++    ins, vocal = [], []
++    for bar in bars:
++        start, end = bar['start'], bar['end']
++        events = [x for x in notes if x[0] < end and x[0] + x[2] > start]
++        pieces, cursor, active = [], start, {}
++        for onset, pitch, duration in events:
++            a, b = max(start, onset), min(end, onset + duration)
++            if a > cursor:
++                pieces.extend('z' + (str(n) if n != 1 else '') for n in lengths((a - cursor) / unit_quarters))
++            parts = lengths((b - a) / unit_quarters)
++            for i, count in enumerate(parts):
++                tie = '-' if i < len(parts) - 1 or b < onset + duration else ''
++                pieces.append(spelling(pitch, bar['key'], active) + (str(count) if count != 1 else '') + tie)
++            cursor = b
++        if cursor < end:
++            pieces.extend('z' + (str(n) if n != 1 else '') for n in lengths((end - cursor) / unit_quarters))
++        ins.append(''.join(pieces) if events else 'Z')
++        current = next((symbol for when, symbol in reversed(chords) if when <= start), None)
++        changes = [(start, current)] + [(when, symbol) for when, symbol in chords if start < when < end]
++        chunks = []
++        for i, (when, symbol) in enumerate(changes):
++            stop = changes[i + 1][0] if i + 1 < len(changes) else end
++            chunks.append(('"' + symbol + '"') if symbol else '')
++            chunks.extend('z' + (str(n) if n != 1 else '') for n in lengths((stop - when) / unit_quarters))
++        vocal.append(''.join(chunks) if any(symbol for _, symbol in changes) else 'Z')
++    header = ['X:1', 'T:', 'M:' + bars[0]['meter'], f'L:1/{unit_denominator}', f'Q:1/4={bpm}',
++        'V: Vocal clef=treble name="Vocal Melody" snm="Vocal"',
++        'V: Ins clef=treble name="Ins Melody" snm="Inst."', 'K:' + bars[0]['key']]
++    lines, index = header, 0
++    while index < len(bars):
++        bar = bars[index]
++        previous = bars[index - 1] if index else bar
++        end = index + 1
++        while end < len(bars) and end - index < 4 and all(bars[end][k] == bar[k] for k in ('meter', 'key', 'section')):
++            end += 1
++        if bar['section'] is not None and (index == 0 or bar['section'] != previous['section']):
++            lines.append('% ' + bar['section'])
++        for voice, rendered in (('Vocal', vocal), ('Ins', ins)):
++            lines.append('V: ' + voice)
++            if bar['meter'] != previous['meter']:
++                lines.append('M:' + bar['meter'])
++            if bar['key'] != previous['key']:
++                lines.append('K:' + bar['key'])
++            lines.append(compress(rendered[index:end]))
++        index = end
++    text = '\n'.join(lines) + '\n'
++    parsed = parse_abc(text)
++    if [tuple(x) for x in parsed.voices['Ins'].notes] != notes or parsed.voices['Vocal'].notes:
++        raise ValueError('Internal note roundtrip failed')
++    # Compare active harmony; repeating the active symbol at bar starts is native.
++    def dedup(events):
++        result = []
++        for item in events:
++            if not result or result[-1][1] != item[1]:
++                result.append(tuple(item))
++        return result
++    if dedup(parsed.voices['Vocal'].chords) != dedup(chords):
++        raise ValueError('Internal harmony roundtrip failed')
++    check = report(parsed)
++    check['event_roundtrip'] = True
++    check['scope'] = 'Portable compiler and independent ABC event parser; not the original training exporter'
++    return text, check
++
++
++def main():
++    cli = argparse.ArgumentParser(description=__doc__)
++    cli.add_argument('events', type=Path)
++    cli.add_argument('--output', type=Path, required=True)
++    args = cli.parse_args()
++    try:
++        text, check = compile_events(json.loads(args.events.read_text(encoding='utf-8')))
++        args.output.mkdir(parents=True, exist_ok=False)
++        (args.output / 'score.abc').write_text(text, encoding='utf-8')
++        write_json(args.output / 'score-check.json', check)
++        print(args.output / 'score.abc')
++        return 0
++    except (OSError, ValueError, KeyError, TypeError) as exc:
++        print(f'Score compilation failed: {exc}', file=sys.stderr)
++        return 2
++
++
++if __name__ == '__main__':
++    raise SystemExit(main())
+diff --git a/src/yue2_instrumental/example-original.abc b/src/yue2_instrumental/example-original.abc
+new file mode 100644
+index 0000000..8df97ad
+--- /dev/null
++++ b/src/yue2_instrumental/example-original.abc
+@@ -0,0 +1,20 @@
++X:1
++T:
++M:4/4
++L:1/32
++Q:1/4=96
++V: Vocal clef=treble name="Vocal Melody" snm="Vocal"
++V: Ins clef=treble name="Ins Melody" snm="Inst."
++K:G
++% verse
++V: Vocal
++"G"B16z16|"D7"z32|"G"z32|"D7"z32|
++V: Ins
++d8e6d2B8z8|F8F8=F8z8|d8e6d2B8z8|F8F8=F8z8|
++% outro
++V: Vocal
++M:5/8
++"Em"z16z4|z4"G"z16|
++V: Ins
++M:5/8
++E8G8B4-|B4G8D8|
+diff --git a/src/yue2_instrumental/instrumentalize.py b/src/yue2_instrumental/instrumentalize.py
+new file mode 100644
+index 0000000..dfd008b
+--- /dev/null
++++ b/src/yue2_instrumental/instrumentalize.py
+@@ -0,0 +1,140 @@
++#!/usr/bin/env python3
++"""Move a native YuE2/SheetSage2 vocal melody to the instrumental voice."""
++from __future__ import annotations
++import argparse
++from fractions import Fraction
++from pathlib import Path
++import re
++import sys
++
++from abc_tools import parse_abc
++from common import fresh_directory, write_json
++from compile_score import SECTIONS, compile_events
++
++
++def section_starts(text, score):
++    """Map native section comments to their absolute bar-start times."""
++    cursor, pending = 0, None
++    result = {}
++    for index, line in enumerate(text.splitlines()):
++        if line.startswith('% '):
++            pending = line[2:]
++            if pending not in SECTIONS:
++                raise ValueError(f'Unknown section label: {pending}')
++        if score.music_lines.get(index) != 'Vocal':
++            continue
++        if pending is not None:
++            result[score.voices['Vocal'].bars[cursor][0]] = pending
++            pending = None
++        for bar in line[:-1].split('|'):
++            rest = re.fullmatch(r'Z([2-4])?', bar.strip())
++            cursor += int(rest.group(1) or 1) if rest else 1
++    return result
++
++
++def subtract_intervals(start, duration, occupied):
++    pieces = [(start, start + duration)]
++    for left, right in occupied:
++        remaining = []
++        for a, b in pieces:
++            if right <= a or left >= b:
++                remaining.append((a, b))
++            else:
++                if a < left:
++                    remaining.append((a, left))
++                if right < b:
++                    remaining.append((right, b))
++        pieces = remaining
++    return pieces
++
++
++def convert_score(text, *, overlap='vocal', keep_chords=True):
++    if overlap not in ('vocal', 'error'):
++        raise ValueError('overlap must be vocal or error')
++    if not isinstance(text, str) or not text.strip():
++        raise ValueError('Need a nonempty native score')
++    source = parse_abc(text)
++    vocal, ins = source.voices['Vocal'], source.voices['Ins']
++    if not vocal.notes and not ins.notes:
++        raise ValueError('The score contains no sounding notes')
++    occupied = [(t, t+d) for t, _, d in vocal.notes]
++    merged = [list(n) for n in vocal.notes]
++    affected = []
++    unchanged = 0
++    for index, (start, pitch, duration) in enumerate(ins.notes):
++        pieces = subtract_intervals(start, duration, occupied)
++        if pieces == [(start, start+duration)]:
++            unchanged += 1
++        else:
++            if overlap == 'error':
++                raise ValueError('Vocal and Ins overlap; choose vocal priority or edit the arrangement explicitly')
++            affected.append(dict(ins_note=index, onset=str(start), pitch=pitch, duration=str(duration),
++                retained_segments=[[str(a), str(b-a)] for a,b in pieces]))
++        merged.extend([a, pitch, b-a] for a,b in pieces)
++    merged.sort()
++    sections = section_starts(text, source)
++    starts = {start for start, _, _ in vocal.bars}
++    if any(when not in starts for when, _ in vocal.keys):
++        raise ValueError('An inline key change occurs inside a bar; normalize its spelling without changing pitches first')
++    bars = []
++    for start, _, (n,d) in vocal.bars:
++        key = next(key for t,key in reversed(vocal.keys) if t <= start)
++        bar = dict(meter=f'{n}/{d}',key=key)
++        if start in sections:
++            bar['section'] = sections[start]
++        bars.append(bar)
++    chords = []
++    if keep_chords:
++        for when,symbol in vocal.chords:
++            if chords and chords[-1][0] == str(when):
++                if chords[-1][1] != symbol:
++                    raise ValueError('Conflicting chord labels at the same time')
++                continue
++            chords.append([str(when),symbol])
++    events = dict(bpm=source.bpm,key=vocal.keys[0][1],bars=bars,
++        notes=[[str(t),str(d),p] for t,p,d in merged],chords=chords)
++    converted, _ = compile_events(events)
++    target = parse_abc(converted)
++    if target.voices['Ins'].notes != merged or target.voices['Vocal'].notes:
++        raise ValueError('Voice transfer changed the intended note events')
++    if target.voices['Ins'].bars != ins.bars or target.bpm != source.bpm:
++        raise ValueError('Voice transfer changed meter, timing or tempo')
++    for note in vocal.notes:
++        if note not in target.voices['Ins'].notes:
++            raise ValueError('A vocal note was not preserved exactly')
++    def harmony(chord_list):
++        result=[]
++        for event in chord_list:
++            if not result or result[-1][1] != event[1]: result.append(event)
++        return result
++    if keep_chords and harmony(target.voices['Vocal'].chords) != harmony(vocal.chords):
++        raise ValueError('Voice transfer changed harmony')
++    check = dict(vocal_notes_before=len(vocal.notes),vocal_notes_after=0,
++        original_ins_notes=len(ins.notes),unaltered_ins_notes=unchanged,
++        output_ins_notes=len(merged),vocal_pitch_onset_duration_preserved=True,
++        meter_and_tempo_preserved=True,chords='preserved' if keep_chords else 'removed for melody cover',
++        overlap_policy=overlap,affected_ins_notes=affected,
++        nominal_seconds=float(ins.time*60/source.bpm))
++    return converted, check
++
++
++def main():
++    cli=argparse.ArgumentParser(description=__doc__)
++    cli.add_argument('abc',type=Path)
++    cli.add_argument('--output',type=Path,required=True)
++    cli.add_argument('--overlap',choices=('vocal','error'),default='vocal')
++    cli.add_argument('--drop-chords',action='store_true')
++    args=cli.parse_args()
++    try:
++        text,check=convert_score(args.abc.read_text(encoding='utf-8'),overlap=args.overlap,keep_chords=not args.drop_chords)
++        out=fresh_directory(args.output)
++        (out/'score.abc').write_text(text,encoding='utf-8')
++        write_json(out/'transfer.json',check)
++        return 0
++    except (ValueError,KeyError,TypeError,OSError) as exc:
++        print(f'{type(exc).__name__}: {exc}',file=sys.stderr)
++        return 2
++
++
++if __name__=='__main__':
++    raise SystemExit(main())
+diff --git a/src/yue2_lora.zig b/src/yue2_lora.zig
+new file mode 100644
+index 0000000..51c834c
+--- /dev/null
++++ b/src/yue2_lora.zig
+@@ -0,0 +1,118 @@
++//! YuE2 instrumental AR adapter. Base quantized weights remain unchanged.
++const std = @import("std");
++const mlx = @import("mlx.zig");
++const scope = @import("mlx_scope.zig");
++const A = mlx.mlx_array;
++
++/// Non-owning handles; the engine keeps adapter tensors in float32 for the
++/// reference delta arithmetic. Quantized base matmuls are never re-quantized.
++pub const Linear = struct {
++    base: scope.Linear,
++    a: ?A = null,
++    b: ?A = null,
++    enabled: ?*const bool = null,
++
++    pub fn attach(self: *Linear, down: A, up: A, enabled: *const bool) !void {
++        const w = mlx.getShape(self.base.w);
++        const sa = mlx.getShape(down);
++        const sb = mlx.getShape(up);
++        if (w.len != 2 or sa.len != 2 or sb.len != 2) return error.InstrumentalLoraShapeMismatch;
++        const input = if (self.base.scales != null) w[1] * @as(c_int, @intCast(32 / self.base.bits)) else w[1];
++        if (sa[0] <= 0 or sa[1] != input or sb[0] != w[0] or sb[1] != sa[0]) return error.InstrumentalLoraShapeMismatch;
++        self.a = down;
++        self.b = up;
++        self.enabled = enabled;
++    }
++
++    pub fn forward(self: *const Linear, sc: *scope.Scope, x: A) !A {
++        const y = try self.base.forward(sc, x);
++        if (self.enabled == null or !self.enabled.?.*) return y;
++        const down = self.a orelse return error.InstrumentalLoraIncomplete;
++        const up = self.b orelse return error.InstrumentalLoraIncomplete;
++        const rank = try sc.matmul(try sc.astype(x, .float32), try sc.transpose(down, &.{ 1, 0 }));
++        const delta = try sc.matmul(rank, try sc.transpose(up, &.{ 1, 0 }));
++        return sc.add(y, try sc.astype(delta, mlx.mlx_array_dtype(y)));
++    }
++};
++
++test "yue2 lora toggles additive projection without modifying base" {
++    const a = std.testing.allocator;
++    var sc = scope.Scope.init(a, mlx.mlx_default_gpu_stream_new());
++    defer sc.deinit();
++    const x = try sc.fromF32(&.{ 1, 2 }, &.{ 1, 2 });
++    const w = try sc.fromF32(&.{ 1, 0, 0, 1 }, &.{ 2, 2 });
++    const down = try sc.fromF32(&.{ 2, 0 }, &.{ 1, 2 });
++    const up = try sc.fromF32(&.{ 3, 4 }, &.{ 2, 1 });
++    var enabled = false;
++    var linear = Linear{ .base = .{ .w = w } };
++    try linear.attach(down, up, &enabled);
++    const off = try linear.forward(&sc, x);
++    enabled = true;
++    const on = try linear.forward(&sc, x);
++    enabled = false;
++    const restored = try linear.forward(&sc, x);
++    for ([_]struct { arr: A, want: [2]f32 }{
++        .{ .arr = off, .want = .{ 1, 2 } },
++        .{ .arr = on, .want = .{ 7, 10 } },
++        .{ .arr = restored, .want = .{ 1, 2 } },
++    }) |item| {
++        try mlx.check(mlx.mlx_array_eval(item.arr));
++        const data = mlx.mlx_array_data_float32(item.arr).?;
++        for (item.want, 0..) |value, i| try std.testing.expectApproxEqAbs(value, data[i], 1e-6);
++    }
++}
++
++test "yue2 lora rejects incompatible shapes" {
++    var sc = scope.Scope.init(std.testing.allocator, mlx.mlx_default_gpu_stream_new());
++    defer sc.deinit();
++    const w = try sc.fromF32(&.{ 1, 0, 0, 1 }, &.{ 2, 2 });
++    const wrong = try sc.fromF32(&.{ 1, 2, 3 }, &.{ 1, 3 });
++    const up = try sc.fromF32(&.{ 1, 2 }, &.{ 2, 1 });
++    var enabled = true;
++    var linear = Linear{ .base = .{ .w = w } };
++    try std.testing.expectError(error.InstrumentalLoraShapeMismatch, linear.attach(wrong, up, &enabled));
++}
++
++test "yue2 lora adds delta to an 8-bit base without requantizing" {
++    const a = std.testing.allocator;
++    const stream = mlx.mlx_default_gpu_stream_new();
++    var sc = scope.Scope.init(a, stream);
++    defer sc.deinit();
++    var weights: [128]f32 = undefined;
++    for (&weights, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 17)) / 17;
++    const w = try sc.fromF32(&weights, &.{ 2, 64 });
++    const x = try sc.fromF32(&(@as([64]f32, @splat(1))), &.{ 1, 64 });
++    var down_data: [64]f32 = @splat(0);
++    down_data[0] = 2;
++    const down = try sc.fromF32(&down_data, &.{ 1, 64 });
++    const up = try sc.fromF32(&.{ 3, 4 }, &.{ 2, 1 });
++    var triple = mlx.mlx_vector_array_new();
++    defer _ = mlx.mlx_vector_array_free(triple);
++    try mlx.check(mlx.mlx_quantize(&triple, w, mlx.mlx_optional_int.some(64), mlx.mlx_optional_int.some(8), "affine", .{}, stream));
++    var qw = mlx.mlx_array_new();
++    var qs = mlx.mlx_array_new();
++    var qb = mlx.mlx_array_new();
++    defer _ = mlx.mlx_array_free(qw);
++    defer _ = mlx.mlx_array_free(qs);
++    defer _ = mlx.mlx_array_free(qb);
++    try mlx.check(mlx.mlx_vector_array_get(&qw, triple, 0));
++    try mlx.check(mlx.mlx_vector_array_get(&qs, triple, 1));
++    try mlx.check(mlx.mlx_vector_array_get(&qb, triple, 2));
++    var enabled = false;
++    var linear = Linear{ .base = .{ .w = qw, .scales = qs, .biases = qb, .bits = 8, .group_size = 64 } };
++    try linear.attach(down, up, &enabled);
++    const baseline = try linear.forward(&sc, x);
++    enabled = true;
++    const on = try linear.forward(&sc, x);
++    const diff = try sc.sub(on, baseline);
++    try mlx.check(mlx.mlx_array_eval(diff));
++    const data = mlx.mlx_array_data_float32(diff).?;
++    try std.testing.expectApproxEqAbs(@as(f32, 6), data[0], 1e-5);
++    try std.testing.expectApproxEqAbs(@as(f32, 8), data[1], 1e-5);
++    enabled = false;
++    const restored_diff = try sc.sub(try linear.forward(&sc, x), baseline);
++    try mlx.check(mlx.mlx_array_eval(restored_diff));
++    const restored = mlx.mlx_array_data_float32(restored_diff).?;
++    try std.testing.expectEqual(@as(f32, 0), restored[0]);
++    try std.testing.expectEqual(@as(f32, 0), restored[1]);
++}
+diff --git a/tests/test_yue2_gen.sh b/tests/test_yue2_gen.sh
+index 2f0e399..dc17069 100755
+--- a/tests/test_yue2_gen.sh
++++ b/tests/test_yue2_gen.sh
+@@ -18,6 +18,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ BIN="${MLX_SERVE_BIN:-$ROOT/zig-out/bin/mlx-serve}"
+ [ -x "$BIN" ] || { echo "FAIL: build first (zig build -Doptimize=ReleaseFast)"; exit 1; }
+ 
++# The new mode requires trained AR weights, not just score editing.
++export YUE2_INSTRUMENTAL_LORA="${YUE2_INSTRUMENTAL_LORA:-$ROOT/runtime-assets/yue2/ar_lora_inst_v3abc.bf16.safetensors}"
+ MODEL="${YUE2_MODEL:-$(ls -d ~/.mlx-serve/models/ddalcu/YuE2-3B-MLX-Serve-8bit 2>/dev/null | head -1)}"
+ CHAT="${CHAT_MODEL:-$(ls -d ~/.mlx-serve/models/mlx-community/Qwen3.5-0.8B-MLX-4bit 2>/dev/null | head -1)}"
+ [ -n "$MODEL" ] || { echo "SKIP: no YuE2 pack (set YUE2_MODEL to a converted dir)"; exit 0; }
+@@ -76,10 +78,11 @@ b400 "cfg 99" "{\"model\":\"$ID\",\"prompt\":\"pop\",\"lyrics\":\"$LY\",\"cfg_sc
+ # Fields another backend owns are refused BY NAME, never ignored.
+ for f in 'bpm:"bpm":120' 'keyscale:"keyscale":"C major"' 'timesignature:"timesignature":"4/4"' \
+          'vocal_language:"vocal_language":"en"' 'ref_audio:"ref_audio":"AAAA"' 'src_audio:"src_audio":"AAAA"' \
+-         'task:"task":"cover"' 'instrumental:"instrumental":true'; do
++         'task:"task":"cover"'; do
+   name="${f%%:*}"; frag="${f#*:}"
+   b400 "unsupported field $name" "{\"model\":\"$ID\",\"prompt\":\"pop\",\"lyrics\":\"$LY\",$frag}" "$name"
+ done
++b400 "instrumental with cot off" "{\"model\":\"$ID\",\"prompt\":\"ambient\",\"instrumental\":true,\"cot\":\"off\"}" instrumental
+ code=$(api /v1/audio/speech -X POST -H 'Content-Type: application/json' \
+   -d "{\"model\":\"$ID\",\"input\":\"hello\"}" -o /dev/null -w "%{http_code}")
+ [ "$code" = "400" ] || { echo "FAIL: /v1/audio/speech on a music model returned $code (want 400)"; exit 1; }
+@@ -167,6 +170,53 @@ tail -n +"$((mark + 1))" "$TMP/server.log" | grep -q '\[yue2\] planning' \
+   && { echo "FAIL: a supplied score was re-planned"; exit 1; }
+ echo "PASS: abc supplied -> no planning phase"
+ 
++# Instrumental API: three successive requests (no lyric words, fresh prefixes),
++# with event invariants checked against the score actually sent to synthesis.
++for seed in 41 42 43; do
++  python3 - "$ROOT" "$TMP" "$ID" "$seed" <<'PYREQ'
++import json, os, pathlib, sys
++root, tmp, mid, seed = sys.argv[1:]
++abc = (pathlib.Path(root) / 'src/yue2_instrumental/example-original.abc').read_text()
++body = dict(model=mid, prompt='Lo-fi, Rhodes piano, mellow bass, brushed drums',
++            instrumental=True, lyrics='these words must be ignored',
++            cot='full', duration_seconds=5, seed=int(seed), stream=True)
++if seed != '41': body['abc'] = abc  # First request exercises model planning + transfer.
++else: body['duration_seconds'] = int(os.environ.get('YUE2_INSTRUMENTAL_SECONDS', '5'))
++json.dump(body, open(tmp + '/instrumental.json', 'w'))
++PYREQ
++  instrumental_started_seconds=$(date +%s)
++  api /v1/audio/music-generations -X POST -H 'Content-Type: application/json' \
++    -d @"$TMP/instrumental.json" > "$TMP/instrumental.sse"
++  python3 - "$ROOT" "$TMP" <<'PYCHECK'
++import base64, json, pathlib, sys, wave
++root, tmp = sys.argv[1:]
++sys.path.insert(0, root + '/src/yue2_instrumental')
++from abc_tools import parse_abc
++from instrumentalize import convert_score
++rows = [json.loads(s[6:]) for s in pathlib.Path(tmp + '/instrumental.sse').read_text().splitlines()
++        if s.startswith('data: ') and s[6:].strip() != '[DONE]']
++assert not [r for r in rows if r.get('type') == 'error'], rows
++complete = next(r for r in rows if r.get('type') == 'complete')
++expected, report = convert_score(complete['original_abc'])
++assert complete['abc'] == expected
++assert complete['instrumental_transfer'] == report
++assert not parse_abc(complete['abc']).voices['Vocal'].notes
++path = tmp + '/instrumental.wav'
++pathlib.Path(path).write_bytes(base64.b64decode(complete['data']))
++with wave.open(path) as audio:
++    assert audio.getframerate() == 48000 and audio.getnchannels() == 2
++    assert audio.getnframes() > 0
++print('PASS: instrumental API, transformed score and audit, stereo WAV')
++PYCHECK
++  [ $? -eq 0 ] || exit 1
++  echo "TIMING: instrumental seed=$seed wall_seconds=$(( $(date +%s) - instrumental_started_seconds ))"
++  if [ -n "${YUE2_TEST_OUTPUT:-}" ]; then
++    mkdir -p "$YUE2_TEST_OUTPUT"
++    cp "$TMP/instrumental.wav" "$YUE2_TEST_OUTPUT/instrumental-$seed.wav"
++    cp "$TMP/instrumental.sse" "$YUE2_TEST_OUTPUT/instrumental-$seed.sse"
++  fi
++done
++
+ # 6. Server alive, no MLX error, then coexist with a chat model.
+ curl -sf "http://127.0.0.1:$PORT/health" >/dev/null || { echo "FAIL: server died"; exit 1; }
+ grep -q '\[mlx\]' "$TMP/server.log" && { echo "FAIL: MLX error in the log"; grep '\[mlx\]' "$TMP/server.log" | head -3; exit 1; }
+@@ -190,4 +240,12 @@ assert m and m[0]['state']=='unloaded', 'model should be unloaded: '+json.dumps(
+ print('PASS: unload-model -> unloaded (stub retained)')
+ "
+ 
++# Optional local evidence directory, separate from the user's music library.
++if [ -n "${YUE2_TEST_OUTPUT:-}" ]; then
++  mkdir -p "$YUE2_TEST_OUTPUT"
++  cp "$TMP/instrumental.wav" "$YUE2_TEST_OUTPUT/instrumental.wav"
++  cp "$TMP/instrumental.sse" "$YUE2_TEST_OUTPUT/instrumental.sse"
++  cp "$TMP/server.log" "$YUE2_TEST_OUTPUT/server.log"
++fi
++
+ echo "ALL PASS: YuE2 gen (load->gen->unload, named 400s, WAV frames, seeded repeat, planned and supplied scores)"
+diff --git a/tests/test_yue2_instrumental.py b/tests/test_yue2_instrumental.py
+new file mode 100644
+index 0000000..6ede64f
+--- /dev/null
++++ b/tests/test_yue2_instrumental.py
+@@ -0,0 +1,67 @@
++"""CPU-only integration of the exact embedded official score transformer."""
++import json, pathlib, subprocess, sys, unittest
++ROOT = pathlib.Path(__file__).resolve().parents[1]
++HELPER = ROOT / 'src/yue2_instrumental/bridge.py'
++
++class InstrumentalTests(unittest.TestCase):
++    def invoke(self, score):
++        return subprocess.run([sys.executable, '-I', str(HELPER), score], capture_output=True, text=True)
++
++    def test_moves_vocal_preserves_harmony_and_ins_fill(self):
++        score = '''X:1
++T:
++M:4/4
++L:1/8
++Q:1/4=80
++V: Vocal clef=treble name="Vocal Melody" snm="Vocal"
++V: Ins clef=treble name="Ins Melody" snm="Inst."
++K:C
++% verse
++V: Vocal
++"C"C4 z4|
++V: Ins
++G8|
++'''
++        result = self.invoke(score)
++        self.assertEqual(result.returncode, 0, result.stderr)
++        sys.path.insert(0, str(HELPER.parent))
++        from abc_tools import parse_abc
++        source, target = parse_abc(score), parse_abc(json.loads(result.stdout)['abc'])
++        self.assertFalse(target.voices['Vocal'].notes)
++        self.assertEqual(target.voices['Vocal'].chords, source.voices['Vocal'].chords)
++        self.assertEqual(target.voices['Ins'].notes, [[0, 60, 2], [2, 67, 2]])
++        self.assertEqual(target.bpm, source.bpm)
++
++    def test_invalid_score_fails_closed(self):
++        result = self.invoke('X:1\nK:C\nCDEF|')
++        self.assertNotEqual(result.returncode, 0)
++        self.assertEqual(result.stdout, '')
++
++    def test_embedded_protocol_matches_official_event_transform(self):
++        sys.path.insert(0, str(HELPER.parent))
++        from instrumentalize import convert_score
++        score = (HELPER.parent / 'example-original.abc').read_text()
++        expected, report = convert_score(score)
++        sources = {name: (HELPER.parent / (name + '.py')).read_text()
++                   for name in ('abc_tools', 'common', 'compile_score', 'instrumentalize')}
++        for python in (sys.executable, '/usr/bin/python3'):
++            result = subprocess.run([python, '-I', '-c', HELPER.read_text(), json.dumps(sources), score],
++                                    capture_output=True, text=True, timeout=10)
++            self.assertEqual(result.returncode, 0, result.stderr)
++            data = json.loads(result.stdout)
++            self.assertEqual(data['abc'], expected)
++            self.assertEqual(data['transfer'], report)
++            self.assertEqual(report['vocal_notes_after'], 0)
++            self.assertTrue(report['vocal_pitch_onset_duration_preserved'])
++
++    def test_repeated_transfers_are_stable(self):
++        score = (HELPER.parent / 'example-original.abc').read_text()
++        first = json.loads(self.invoke(score).stdout)['abc']
++        for _ in range(3):
++            again = self.invoke(first)
++            self.assertEqual(again.returncode, 0, again.stderr)
++            data = json.loads(again.stdout)
++            self.assertEqual(data['abc'], first)
++            self.assertEqual(data['transfer']['vocal_notes_after'], 0)
++
++if __name__ == '__main__': unittest.main()

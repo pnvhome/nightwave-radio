@@ -1,0 +1,12 @@
+.build/
+.swiftpm/
+build/
+.DS_Store
+validation/
+vendor-cache/
+release/
+*.dmg
+*.safetensors
+*.wav
+*.m4a
+*.log

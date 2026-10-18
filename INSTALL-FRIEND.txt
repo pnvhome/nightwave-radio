@@ -1,0 +1,22 @@
+Nightwave Radio — installation
+
+Requires Apple Silicon (M1 or newer), macOS 26.2+, and about 5 GB for the model.
+16 GB unified memory recommended. Intel and 8 GB configurations are not validated.
+
+1. Drag Nightwave Radio into Applications.
+2. Open it and click Download model, or choose an existing YuE2 MLX-Serve model folder.
+3. Choose a station and click Start radio.
+
+No separate MLX-Serve installation, Homebrew, Xcode or Python is needed to use this app.
+Models: ~/Library/Application Support/Nightwave Radio/Models/
+Recordings: ~/Music/Nightwave Radio/
+Open model folder and Open recordings folder reveal these locations in Finder.
+
+This beta is ad-hoc signed, not Developer ID signed or notarized.
+If macOS blocks the first launch, follow Apple's guidance for trusted apps:
+https://support.apple.com/102445
+Do not disable Gatekeeper globally.
+
+The app source is MIT. YuE2 and the bundled Mothersuperior instrumental LoRA
+are CC BY-NC 4.0: non-commercial use only. See the app's Licenses button and
+THIRD_PARTY_NOTICES.md in the source repository for full credits and terms.
