@@ -205,3 +205,48 @@ final class RetryExecutionTests: XCTestCase {
         }
     }
 }
+
+final class AdaptiveCompositionTests: XCTestCase {
+    func testRetriesChangeArrangementButPreserveUserChoicesAndInstrumentalPipeline() {
+        var settings = RadioSettings()
+        settings.selectStation(.ambient)
+        settings.customPrompt = "soft cello and distant bells"
+        settings.vinyl = true
+        let requests = (1...3).map { settings.request(model: "yue2", index: 5, salt: 7, seed: 42, attempt: $0) }
+        let prompts = requests.map { $0["prompt"] as! String }
+        XCTAssertEqual(Set(prompts).count, 3)
+        for (request, prompt) in zip(requests, prompts) {
+            XCTAssertEqual(request["instrumental"] as? Bool, true)
+            XCTAssertEqual(request["cot"] as? String, "full")
+            XCTAssertEqual(request["duration_seconds"] as? Int, 180)
+            XCTAssertTrue(prompt.contains(settings.customPrompt))
+            XCTAssertTrue(prompt.contains("no drums"))
+            XCTAssertTrue(prompt.contains("vinyl"))
+            XCTAssertTrue(prompt.contains("contrasting middle section"))
+        }
+    }
+    func testFirstAttemptRetainsExistingNonAmbientPrompt() {
+        let settings = RadioSettings()
+        XCTAssertEqual(settings.prompt(index: 0, salt: 0), "Instrumental lo-fi chillhop, warm Rhodes piano, mellow bass, relaxed slow groove, cozy late-night atmosphere, gentle electric piano motif, subtle vinyl crackle and warm tape saturation, soft restrained brushed drums, spacious gentle reverb")
+    }
+}
+
+final class ScoreQualityTests: XCTestCase {
+    func score(_ phrases: [String]) -> String {
+        "X:1\nK:C\n" + phrases.map { "V: Vocal\nz8|z8|z8|z8|\nV: Ins\n" + $0 }.joined(separator: "\n")
+    }
+    func testRejectsDominantPhraseAcrossSeparatedSections() {
+        let repeated = "C2D2E2F2|G2A2B2c2|d2e2f2g2|a2b2c2d2|"
+        let phrases = (0..<20).map { $0 % 4 == 0 ? repeated : "C8|D8|E8|F\($0 + 1)|" }
+        XCTAssertTrue(ScoreQuality.hasDominantMelodicLoop(score(phrases)))
+    }
+    func testAllowsVariedCompositionAndRestOrDroneTextures() {
+        XCTAssertFalse(ScoreQuality.hasDominantMelodicLoop(score((0..<20).map { "C8|D8|E8|F\($0 + 1)|" })))
+        XCTAssertFalse(ScoreQuality.hasDominantMelodicLoop(score(Array(repeating: "z8|C8|C8|z8|", count: 20))))
+        XCTAssertFalse(ScoreQuality.hasDominantMelodicLoop(score(Array(repeating: "CDEFGABc|C8|D8|E8|", count: 3))))
+    }
+    func testRepetitiveScoresUseBoundedRetry() {
+        XCTAssertTrue(GenerationRetry.shouldRetry(ScoreQuality.Repetitive().localizedDescription, completedAttempts: 1))
+        XCTAssertFalse(GenerationRetry.shouldRetry(ScoreQuality.Repetitive().localizedDescription, completedAttempts: 3))
+    }
+}

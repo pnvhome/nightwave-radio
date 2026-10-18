@@ -3,7 +3,7 @@
 build/
 .DS_Store
 validation/
-vendor-cache/
+vendor-cache
 release/
 *.dmg
 *.safetensors

@@ -118,11 +118,11 @@ final class LocalEngine {
             throw RadioFailure(detail)
         }
     }
-    func generate(settings: RadioSettings, model: URL, index: Int, salt: Int, output: URL,
+    func generate(settings: RadioSettings, model: URL, index: Int, salt: Int, output: URL, attempt: Int = 1,
                   progress: @escaping (String, Double?) -> Void) async throws -> SavedTrack {
         guard let loadedModelID else { throw RadioFailure("Load the music model first.") }
         let seed = Int.random(in: 1...Int(Int32.max))
-        let body = settings.request(model: loadedModelID, index: index, salt: salt, seed: seed)
+        let body = settings.request(model: loadedModelID, index: index, salt: salt, seed: seed, attempt: attempt)
         var request = URLRequest(url: endpoint("/v1/audio/music-generations"))
         request.httpMethod = "POST"; request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -145,6 +145,8 @@ final class LocalEngine {
                 let step = (event["step"] as? NSNumber)?.doubleValue ?? 0
                 progress(names[stage] ?? "Creating music", total > 0 ? min(1, step / total) : nil)
             case "complete":
+                if settings.station == .ambient, let score = event["abc"] as? String,
+                   ScoreQuality.hasDominantMelodicLoop(score) { throw ScoreQuality.Repetitive() }
                 guard let base64 = event["data"] as? String else { throw RadioFailure("The engine returned an empty track.") }
                 let saved = try await Task.detached(priority: .userInitiated) {
                     guard let wav = Data(base64Encoded: base64), wav.count > 44 else { throw RadioFailure("The audio file is damaged.") }
@@ -158,7 +160,7 @@ final class LocalEngine {
                         try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: TrackFiles.sidecar(output, extension: "transfer.json"), options: .atomic)
                     }
                     try JSONSerialization.data(withJSONObject: body, options: [.prettyPrinted, .sortedKeys]).write(to: TrackFiles.sidecar(output, extension: "request.json"), options: .atomic)
-                    return SavedTrack(title: settings.station.title + " · " + String(index + 1), path: output.path, prompt: settings.prompt(index: index, salt: salt), seed: seed)
+                    return SavedTrack(title: settings.station.title + " · " + String(index + 1), path: output.path, prompt: settings.prompt(index: index, salt: salt, attempt: attempt), seed: seed)
                 }.value
                 return saved
             default: break

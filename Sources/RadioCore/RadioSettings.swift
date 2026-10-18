@@ -67,9 +67,10 @@ public struct RadioSettings: Codable, Equatable {
         space = true
         darkMood = station == .cyberpunk
     }
-    public func prompt(index: Int, salt: Int) -> String {
+    public func prompt(index: Int, salt: Int, attempt: Int = 1) -> String {
         let variations = station.variations
-        let variation = variations[((index % variations.count) + (salt % variations.count) + variations.count) % variations.count]
+        let offset = max(0, min(attempt, 3) - 1)
+        let variation = variations[((index % variations.count) + (salt % variations.count) + variations.count + offset) % variations.count]
         var parts = [station.style, variation]
         if !customPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { parts.append(customPrompt) }
         if vinyl { parts.append("subtle vinyl crackle and warm tape saturation") }
@@ -77,10 +78,18 @@ public struct RadioSettings: Codable, Equatable {
         else if softDrums { parts.append("soft restrained brushed drums") }
         if space { parts.append("spacious gentle reverb") }
         if darkMood { parts.append("darker minor-key mood") }
+        if station == .ambient {
+            parts.append("gradually changing harmonies, evolving melodic phrases, contrasting middle section, gentle resolved ending")
+        }
+        if attempt > 1 {
+            parts.append(attempt == 2
+                ? "concise arrangement, clear introduction, two contrasting themes, short outro"
+                : "simple sparse arrangement, short melodic phrases with variation, clear ending")
+        }
         return parts.joined(separator: ", ")
     }
-    public func request(model: String, index: Int, salt: Int, seed: Int) -> [String: Any] {
-        ["model": model, "prompt": prompt(index: index, salt: salt), "instrumental": true,
+    public func request(model: String, index: Int, salt: Int, seed: Int, attempt: Int = 1) -> [String: Any] {
+        ["model": model, "prompt": prompt(index: index, salt: salt, attempt: attempt), "instrumental": true,
          "cot": "full", "duration_seconds": duration, "steps": 32, "seed": seed, "stream": true]
     }
 }

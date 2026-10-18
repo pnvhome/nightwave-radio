@@ -195,7 +195,7 @@ final class RadioController: NSObject, ObservableObject, AVAudioPlayerDelegate {
     private func generateTrack(settings: RadioSettings, output: URL, id: UUID) async throws -> SavedTrack {
         generationAttempt = 1
         return try await GenerationRetry.perform(operation: {
-            try await self.engine.generate(settings: settings, model: self.modelURL, index: self.index, salt: self.salt, output: output) { stage, progress in
+            try await self.engine.generate(settings: settings, model: self.modelURL, index: self.index, salt: self.salt, output: output, attempt: self.generationAttempt) { stage, progress in
                 guard self.runID == id else { return }
                 self.status = stage + (self.generationAttempt > 1 ? " · attempt \(self.generationAttempt)/3" : "")
                 self.generationProgress = progress

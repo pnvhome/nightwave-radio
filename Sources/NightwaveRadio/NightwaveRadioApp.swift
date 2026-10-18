@@ -27,7 +27,7 @@ struct NightwaveRadioApp: App {
                 .frame(minWidth: 980, minHeight: 740)
                 .onAppear {
                     delegate.controller = controller
-                    if CommandLine.arguments.contains("--smoke-test") { runSmoke() }
+                    if CommandLine.arguments.contains("--smoke-test") || CommandLine.arguments.contains("--ambient-test") { runSmoke() }
                     if CommandLine.arguments.contains("--queue-test") { runQueueTest() }
                 }
         }
@@ -113,7 +113,12 @@ struct NightwaveRadioApp: App {
             do {
                 try await engine.prepare(model: ModelLibrary.preferredURL())
                 var settings = RadioSettings(); settings.duration = 5
-                let track = try await engine.generate(settings: settings, model: ModelLibrary.preferredURL(), index: 0, salt: 1, output: root.appendingPathComponent("test.m4a")) { _, _ in }
+                let ambientTest = CommandLine.arguments.contains("--ambient-test")
+                if ambientTest { settings.selectStation(.ambient); settings.duration = 180; settings.vinyl = true }
+                var attempt = 1
+                let track = try await GenerationRetry.perform(operation: {
+                    try await engine.generate(settings: settings, model: ModelLibrary.preferredURL(), index: 0, salt: 1, output: root.appendingPathComponent("test.m4a"), attempt: attempt) { _, _ in }
+                }, onRetry: { attempt = $0 })
                 engine.stop()
                 try "PASS: bundled engine, installed YuE2, instrumental LoRA, full-score generation\n\(track.path)\n".write(to: root.appendingPathComponent("result.txt"), atomically: true, encoding: .utf8)
                 print("SMOKE PASS: \(root.path)")
